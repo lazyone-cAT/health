@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: phc-inventory
+    runtime: python
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt && npm --prefix frontend install && npm --prefix frontend run build
+    startCommand: gunicorn --chdir backend app:app --bind 0.0.0.0:$PORT
+    healthCheckPath: /
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true

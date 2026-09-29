@@ -1,8 +1,7 @@
 """PHC Medicine Inventory — District Officer Command Center (Flask JSON API)."""
 import os
-import sqlite3
 
-from flask import Flask, jsonify, redirect, request, send_from_directory, session
+from flask import Flask, jsonify, request, send_from_directory, session
 
 import db as database
 import stock
@@ -18,6 +17,11 @@ app.secret_key = os.environ.get("SECRET_KEY", "phc-inventory-secret-2026")
 app.config.update(SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_HTTPONLY=True)
 
 PHC_MANAGER_ROLES = ("district_officer", "phc_manager")
+
+# Seed the database at import time so gunicorn (which imports this module
+# instead of running it as __main__) also gets schema + seed data.
+# bootstrap() is idempotent: CREATE IF NOT EXISTS + seed only when empty.
+database.bootstrap()
 
 
 def get_db():
