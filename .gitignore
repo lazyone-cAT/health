@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+backend/phc_inventory.db
+backend/uploads/
+backend/server.log
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/npm-install.log
+
+# OS
+nul
+.DS_Store

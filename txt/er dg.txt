@@ -1,0 +1,91 @@
++------------------+          +------------------+          +------------------+
+|     PATIENT      |          |      ROOM        |          |      STAFF       |
+|------------------|          |------------------|          |------------------|
+| Patient_ID (PK)  |----------| Room_ID (PK)     |          | Staff_ID (PK)    |
+| Full_Name        |  1   M   | Floor            |          | Full_Name        |
+| DOB              |          | Ward_Name        |          | Role (Doc/Nurse/ |
+| Gender           |          | Room_Type (ICU/  |          |       Worker)    |
+| Contact          |          |   General/Private|          | Specialty        |
++------------------+          +------------------+          | Phone            |
+       |                               |                     +------------------+
+       | 1                             | 1                         | 1
+       |                               |                           |
+       |                               |                           |
+       | M                             | M                         | M
++------------------+          +------------------+          +------------------+
+|   ADMISSION      |          |      BED         |          |   ATTENDANCE     |
+|------------------|          |------------------|          |------------------|
+| Admission_ID(PK) |--M----1--| Bed_ID (PK)      |          | Attendance_ID(PK)|
+| Patient_ID (FK)  |          | Room_ID (FK)     |          | Staff_ID (FK)    |
+| Bed_ID (FK)      |          | Bed_Number       |          | Check_In_Time    |
+| Admit_DateTime   |          | Is_Isolation     |          | Check_Out_Time   |
+| Discharge_Ordered|          | Current_Status   |          | Shift_Date       |
+| Discharge_Actual |          | (Clean/Dirty/Occ)|          +------------------+
+| (Calculated)     |          +------------------+
+| Time_Left =      |                | 1
+| Discharge_Ordered|                |
+|   - NOW()        |                | M
++------------------+          +------------------+
+       | M                     |  CLEANING_TASK   |
+       |                       |------------------|
+       |                       | Task_ID (PK)     |
+       |                       | Worker_ID (FK)   |
+       |                       | Bed_ID (FK)      |
+       |                       | Start_Time       |
+       |                       | End_Time         |
+       |                       | Status (Pending/ |
+       |                       |   InProgress/Done)|
+       |                       +------------------+
+       |
+       | M (Patient visits Doctor - Many-to-Many)
+       |
++------------------+          +------------------+
+|  CONSULTATION    |          |    DISEASE       |
+|------------------|          |------------------|
+| Consult_ID (PK)  |--M----M--| Disease_ID (PK)  |
+| Patient_ID (FK)  |          | Disease_Name     |
+| Doctor_ID (FK)   |          | ICD_Code         |
+| Visit_DateTime   |          | Severity         |
+| Symptoms         |          +------------------+
++------------------+
+       |
+       | 1
+       | M (Diagnosis - linking patient visit to disease)
++------------------+
+|   DIAGNOSIS      |
+|------------------|
+| Diagnosis_ID(PK) |
+| Consult_ID (FK)  |
+| Disease_ID (FK)  |
+| Diagnosed_Date   |
++------------------+
+       |
+       | M (Treatment - linking disease to medicine)
+       |
++------------------+          +------------------+
+|  PRESCRIPTION    |          |    MEDICINE      |
+|------------------|          |------------------|
+| Prescription_ID  |--M----M--| Medicine_ID (PK) |
+| Patient_ID (FK)  |          | Medicine_Name    |
+| Doctor_ID (FK)   |          | Category         |
+| Disease_ID (FK)  |          | Dosage_Form      |
+| Medicine_ID (FK) |          | Stock_Available  |
+| Dosage           |          +------------------+
+| Start_Date       |
+| End_Date         |
++------------------+
+
+       | 1
+       | M (Lab Orders)
+       |
++------------------+          +------------------+
+|   LAB_ORDER      |          |   LAB_RESULT     |
+|------------------|          |------------------|
+| Lab_Order_ID(PK) |--1----1--| Result_ID (PK)   |
+| Patient_ID (FK)  |          | Lab_Order_ID(FK) |
+| Doctor_ID (FK)   |          | Test_Name        |
+| Order_DateTime   |          | Result_Value     |
+| Priority (Stat/  |          | Normal_Range     |
+|   Routine)       |          | Result_DateTime  |
++------------------+          | Performed_By     |
+                              +------------------+

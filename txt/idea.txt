@@ -1,0 +1,188 @@
+PROBLEM DESCRIPTION
+
+Data availability, accuracy, consistency, and reporting gaps limit timely and effective management decision-making across hospital operations.
+
+Operations leads across the hospital are expected to make daily decisions on bed capacity, staffing response, and patient flow. The information they need to make those decisions exists — but not in one place, not in one shape, and rarely in time. What reaches them is assembled by hand, hours or days after the events it describes, and frequently disagrees with a report assembled by another department from the same underlying reality.
+
+Six contributing factors have been observed:
+
+1. Disparate sources
+   Operational data is fragmented across unintegrated HIS, EMR, and standalone spreadsheets.
+
+2. Manual compilation
+   Significant staff time is spent manually collating daily operational reports.
+
+3. Data inconsistency
+   Conflicting metrics create different "versions of truth" across departmental reports.
+
+4. Reporting delays
+   Information reaches operational leads days after events, impeding quick response.
+
+5. Limited real-time visibility
+   No live dashboards exist for bed occupancy, queue status, or resource bottlenecks.
+
+6. Administrative burden
+   High reporting effort draws attention away from core operational management.
+
+THE CHALLENGE QUESTION
+
+Do decision-makers currently have the right information, at the right time, in the right format?
+
+This is the question your submission has to answer. Everything you build should be traceable back to it.
+
+Download Sample Files
+Constraints
+
+SOLUTION EXPECTATIONS
+
+BUILT FOR
+Operations leads who need a timely, unified view instead of manually compiling reports from disconnected systems each day. Assume your user is competent at their job but not technical. They will not read your code.
+
+WHAT TO BUILD
+A working solution — a prototype, a tool, an analytical model, or a process redesign. There is no single correct shape for the answer. What matters is that it works against the data provided and that its value is demonstrable.
+
+SAMPLE DATA PROVIDED
+Three synthetic extracts, deliberately inconsistent with one another:
+
+1. HIS admissions/discharge export
+2. Lab order-to-result turnaround log
+3. Manually maintained bed occupancy sheet
+
+The inconsistencies between these three files are intentional and are part of the problem, not a defect in the dataset. Reconciling them — and being explicit about the rules you used to resolve each conflict — is a core part of what is being assessed. Do not silently drop rows that disagree.
+
+WHAT SUCCESS LOOKS LIKE
+A single reconciled view that replaces manual, same-day compilation — accurate, consistent, and available without a person assembling it by hand.
+
+Concretely, a strong submission will:
+- Reconcile the three sources into one view a lead can trust, and state how conflicts were resolved
+- Surface the operational picture that is currently invisible or late
+- Be explainable to a non-technical operations lead without a walkthrough
+- Remove real manual effort, not relocate it
+- Be honest about what it does not cover
+
+Scope is not the goal. A narrow solution that genuinely works and is clearly reasoned scores higher than a broad one that is asserted rather than shown.
+
+
+Page 1: The "Live" Command Center (Dashboard)
+Purpose: Answers "What is happening RIGHT NOW?" (Replaces the morning manual huddle).
+
+Top KPI Cards: Show 4-5 massive, color-coded numbers that update instantly when the data refreshes.
+
+Bed Occupancy % (Red if > 95%).
+
+Patients Pending Discharge (Pulled from HIS, but cross-checked with Bed Sheet).
+
+Average Lab TAT (Turnaround Time) for the last 4 hours.
+
+Total Active Data Conflicts (e.g., "3 mismatches between HIS and Bed Sheet need attention").
+
+Bed Occupancy Heatmap: A visual grid of the hospital floor. Green = Free, Red = Occupied, Yellow = Dirty/Cleaning (Manual sheet wins for this).
+
+Why this replaces manual work: They don't have to call 5 different floors to get these numbers; they are computed automatically.
+
+Page 2: The "Master Reconciliation Table" (The Single Source of Truth)
+Purpose: Answers "Give me the raw, unified data I can trust."
+
+This is a sortable, searchable data table showing every single patient/encounter in one row.
+
+Columns to show: Patient ID, Location (Bed), Admit Time (HIS), Lab Status (Lab Log), Discharge Ordered? (HIS), Bed Ready? (Manual Sheet).
+
+Crucial UI Feature - The "Conflict Badge": Next to any field where the three sources disagreed, put a bright Orange/Yellow warning icon.
+
+Click-to-Explain: When they click that icon, a popup appears saying: "HIS says Discharged at 10:00 AM, but Manual Sheet says Bed still occupied at 11:00 AM. System resolved by trusting Manual Sheet (Rule #4)."
+
+Why this replaces manual work: They no longer have to open three Excel files side-by-side and manually highlight mismatches.
+
+Page 3: The "Patient Journey" Timeline View
+Purpose: Surfaces the "invisible" operational delays (the prompt's #4 and #5).
+
+A Gantt-chart style timeline for an individual patient (or aggregated by ward).
+
+It visually maps: Admit ➔ Lab Ordered ➔ Result Returned ➔ Discharge Order ➔ Bed Cleaned.
+
+The "Gap" Visualization: Put a red dotted line between "Discharge Order" and "Bed Cleaned". Right now, this delay is completely invisible to operations leads. This tool makes it visible for the first time, allowing them to ask: "Why does it take 2 hours to clean a bed after discharge?"
+
+Page 4: The "Conflict Resolution Studio" (Admin Settings)
+Purpose: Allows the non-technical lead to control the "Rules" without coding.
+
+Remember, the prompt says the user is competent but not technical, and they must be able to explain the logic.
+
+Build a simple settings page with toggle switches or dropdowns:
+
+"For Bed Status, which source takes priority?" ➔ Dropdown: [Manual Sheet, HIS, Ask me every time].
+
+"For Lab Results, which source takes priority?" ➔ Dropdown: [Lab Log, HIS].
+
+Why this is critical: If a rule is wrong today, the Operations Lead can change it themselves tomorrow without waiting for an IT ticket. This removes the "black box" fear.
+
+Page 5: The "Honesty & Gaps" Report (Required by the prompt)
+Purpose: Explicitly tells them what the tool CANNOT do.
+
+A dedicated page with a checklist:
+
+✅ Covers: Inpatient bed occupancy, lab TAT, and discharge bottlenecks.
+
+❌ Does NOT cover: Outpatient clinics, Emergency Department triage, or Staff Roster.
+
+❌ Does NOT predict future discharges; it only shows current status.
+
+📅 Data Stale Warning: If the Manual Sheet hasn't been updated in > 4 hours, a giant red banner appears at the top of every page saying "WARNING: Bed Data may be stale."
+
+Recommended Tech Stack for THIS Website
+Since the backend is Python (Pandas), the fastest and most impressive way to build this for a prototype is:
+
+Frontend Framework: Streamlit (Pure Python) - it turns your pandas dataframes into interactive tables and charts with almost zero HTML/CSS code.
+
+Visualization: Plotly for the heatmap and Gantt charts (it's interactive and clickable).
+
+Database: SQLite (just a single .db file) to store the final reconciled tables and the conflict logs.
+
+Refresh Rate: A simple "Refresh Data" button that re-runs the reconciliation script against the newly uploaded files, so the lead doesn't have to restart the app.
+
+The "Killer Feature" to Impress Them
+Add a "Daily Summary PDF/Excel Exporter" button.
+Right now, they manually compile a report for the morning meeting. With your website, they look at the dashboard, click "Export Morning Report", and it automatically generates the exact Excel/PDF they used to spend 2 hours making. This proves you "removed real manual effort, not relocated it."
+
+To sum it up: You are not building a generic website. You are building a Reconciliation Dashboard that does 4 things: Shows (Dashboard), Proves (Table with conflict logs), Explains (Patient timeline), and Adapts (Settings page).
+
+If you want, I can write the exact Streamlit Python code skeleton for Page 1 and Page 2 right now so you can see how it would look. Just let me know!
+
+what is tat
+Analyze the user's query: The user is asking "what is tat" in the context of the previous conversation about hospital operations, data reconciliation, and the application being built.
+
+Contextualize "TAT": In the previous responses, I used the acronym "TAT" several times (e.g., "Lab TAT (Turnaround Time)", "Average Lab TAT"). The user is likely asking for the definition of this acronym.
+
+Formulate the response:
+
+Directly define TAT: Turnaround Time.
+
+Explain it in the specific context of the hospital/operations problem: It is the time taken from when a lab order is placed (e.g., blood test requested) to when the result is reported back to the clinician/operations lead.
+
+Relate it back to the data files provided: The prompt mentions a "Lab order-to-result turnaround log". So TAT is a core metric in that file.
+
+Explain why it matters operationally: Long lab TAT blocks bed flow (you can't discharge a patient or start treatment without results).
+
+Keep it simple and clear, as the user is framing this for a non-technical operations lead.
+
+TAT stands for Turnaround Time.
+
+In the context of your hospital operations project, it specifically means:
+
+The total time taken from when a lab test (like a blood test or X-ray) is ordered to when the result is reported back to the doctor or nurse.
+
+Why is TAT so important for this project?
+The sample data you are given includes a "Lab order-to-result turnaround log". Right now, the Operations Lead cannot see this metric in real-time. Here is why it matters:
+
+It blocks bed flow: A patient cannot be discharged or moved to surgery until their lab results are back. If the average TAT is 4 hours but the hospital thinks it is 2 hours, they make bad decisions about admitting new patients.
+
+It exposes hidden delays: The TAT is usually broken down into sub-steps (e.g., Collection Time ➔ Reception in Lab ➔ Processing ➔ Result Verification). If you build your dashboard and see that TAT is 5 hours, but the actual machine processing only takes 30 minutes, you immediately know the delay is in transport or collection—which is an operational problem you can fix.
+
+How your app should use TAT:
+In the Dashboard KPIs: Show "Current Average Lab TAT" (e.g., 2.5 hours) with a color. Green if under 2 hours, Red if over 4 hours.
+
+In the Patient Timeline: Visually show the gap between the "Lab Order" timestamp and the "Result Returned" timestamp.
+
+In Reconciliation: If the HIS system says a result was returned at 10:00 AM, but the Lab Log says 10:30 AM, your reconciliation rules must pick one (e.g., trust the Lab Log as the source of truth for TAT) and flag the 30-minute conflict.
+
+In short: TAT is the heartbeat metric for operational efficiency in your app. Shorten the TAT, and you free up beds faster.
+

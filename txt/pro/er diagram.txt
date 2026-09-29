@@ -1,0 +1,102 @@
++------------------+          +------------------+          +------------------+
+|     FLOOR        |          |      ROLE        |          |      USER        |
+| (Discord Server) |          | (Discord Rank)   |          | (Staff/Login)    |
+|------------------|          |------------------|          |------------------|
+| Floor_ID (PK)    |----------| Role_ID (PK)     |----------| User_ID (PK)     |
+| Floor_Number     |  1   M   | Role_Name        |  1   M   | Username         |
+| Ward_Name        |          | Priority_Level   |          | Password_Hash    |
+| (e.g., General)  |          | (1=Guest,        |          | Full_Name        |
++------------------+          |  5=Admin)        |          | Role_ID (FK)     |
+       | 1                    +------------------+          | Default_Floor_ID |
+       |                                                   | is_global_admin  |
+       | M                                                  | (0 or 1)         |
+       |                                                   +--------+---------+
+       |                                                            |
+       |                                                            | M (Many-to-Many 
+       |                                                            |   for cross-floor)
+       |                                                            |
++------------------+          +------------------+          +------------------+
+|     ROOM         |          | USER_FLOOR_ACCESS |          |   (Links Users   |
+|------------------|          | (Server Memberships)|         |    to multiple   |
+| Room_ID (PK)     |----------|------------------|          |    Floors)       |
+| Floor_ID (FK)    |  1   M   | User_ID (FK)     |----------+                  |
+| Room_Number      |          | Floor_ID (FK)    |          +------------------+
+| Room_Type        |          | Perm_Override    |
+| (ICU/General)    |          | (Read/Write)     |
++------------------+          +------------------+
+       | 1
+       | M
++------------------+          +------------------+          +------------------+
+|      BED         |          |   ADMISSION      |          |    PATIENT       |
+|------------------|          |------------------|          |------------------|
+| Bed_ID (PK)      |--1----M--| Admission_ID(PK) |--M----1--| Patient_ID (PK)  |
+| Room_ID (FK)     |          | Patient_ID (FK)  |          | Full_Name        |
+| Bed_Number       |          | Bed_ID (FK)      |          | DOB              |
+| Current_Status   |          | Admit_DateTime   |          | Gender           |
+| (Clean/Dirty/    |          | Discharge_Ordered|          | Contact          |
+|  Occupied)       |          | Discharge_Actual |          +------------------+
++------------------+          | Time_Left        |
+       |                      | (Calculated)     |
+       | M                    +--------+---------+
+       |                              |
++------------------+          +------------------+
+|  CLEANING_TASK   |          |  ATTENDANCE      |
+|------------------|          | (Check-in/out)   |
+| Task_ID (PK)     |          |------------------|
+| Worker_ID (FK)   |          | Attendance_ID(PK)|
+| Bed_ID (FK)      |          | User_ID (FK)     |
+| Start_Time       |          | Floor_ID (FK)    |
+| End_Time         |          | Check_In_Time    |
+| Status           |          | Check_Out_Time   |
++------------------+          | Shift_Date       |
+                              +------------------+
+
+       | M (Patient visits Doctor - Many-to-Many)
+       |
++------------------+          +------------------+          +------------------+
+|  CONSULTATION    |          |    DISEASE       |          |    MEDICINE      |
+|------------------|          |------------------|          |------------------|
+| Consult_ID (PK)  |--M----M--| Disease_ID (PK)  |--M----M--| Medicine_ID (PK) |
+| Patient_ID (FK)  |          | Disease_Name     |          | Medicine_Name    |
+| Doctor_ID (FK)   |          | ICD_Code         |          | Category         |
+| Visit_DateTime   |          | Severity         |          | Dosage_Form      |
+| Symptoms         |          +------------------+          | Stock            |
++------------------+                                        +------------------+
+       | 1
+       | M (Diagnosis linking visit to disease)
+       |
++------------------+          +------------------+
+|   DIAGNOSIS      |          |  PRESCRIPTION    |
+|------------------|          |------------------|
+| Diagnosis_ID(PK) |--M----M--| Prescription_ID  |
+| Consult_ID (FK)  |          | Patient_ID (FK)  |
+| Disease_ID (FK)  |          | Doctor_ID (FK)   |
+| Diagnosed_Date   |          | Medicine_ID (FK) |
++------------------+          | Dosage           |
+                              | Start_Date       |
+       | 1                    | End_Date         |
+       | M                    +------------------+
+       |
++------------------+          +------------------+
+|   LAB_ORDER      |          |   LAB_RESULT     |
+|------------------|          |------------------|
+| Lab_Order_ID(PK) |--1----1--| Result_ID (PK)   |
+| Patient_ID (FK)  |          | Lab_Order_ID(FK) |
+| Doctor_ID (FK)   |          | Test_Name        |
+| Order_DateTime   |          | Result_Value     |
+| Priority         |          | Normal_Range     |
++------------------+          | Result_DateTime  |
+                              +------------------+
+
++------------------+          +------------------+ 
+|  CONFLICT_LOG    |          |  RECONCILIATION  |
+| (Audit Trail)    |          |   RULES_ENGINE   |
+|------------------|          |------------------|
+| Log_ID (PK)      |          | Rule_ID (PK)     |
+| Patient_ID (FK)  |          | Rule_Name        |
+| Source_1_Value   |          | Source_Priority  |
+| Source_2_Value   |          | (HIS/Manual/Lab) |
+| Resolution_Rule  |          | Is_Active        |
+| Resolved_By (FK) |          +------------------+
+| Timestamp        |
++------------------+
