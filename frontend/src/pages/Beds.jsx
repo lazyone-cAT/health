@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../auth'
 import { Empty, KpiCard, Modal, PageHeader, Panel, Spinner, Toast } from '../components/ui'
+import { Freshness, usePoll } from '../usePoll'
 
 const pctBar = (pct, tone) => (
   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -23,12 +24,12 @@ export default function Beds() {
   const [toast, setToast] = useState({ message: '', error: false })
   const canEdit = ['admin', 'district_officer', 'state_officer', 'phc_manager'].includes(user.role)
 
-  const load = useCallback(() => {
-    api('/api/beds').then(setBeds).catch((e) => setToast({ message: e.message, error: true }))
-    api('/api/staff').then(setStaff).catch((e) => setToast({ message: e.message, error: true }))
-  }, [])
+  const load = useCallback(() => Promise.all([
+    api('/api/beds').then(setBeds),
+    api('/api/staff').then(setStaff),
+  ]), [])
 
-  useEffect(() => { load() }, [load])
+  const { refresh, lastUpdated, error: pollError, stale } = usePoll(load)
 
   const save = async () => {
     try {
@@ -51,13 +52,13 @@ export default function Beds() {
         setToast({ message: `Saved — ${editing.row.staff_role} attendance updated.`, error: false })
       }
       setEditing(null)
-      load()
+      refresh()
     } catch (e) {
       setToast({ message: e.message, error: true })
     }
   }
 
-  if (!beds || !staff) return <Spinner />
+  if (!beds || !staff) return pollError ? <Empty>{pollError}</Empty> : <Spinner />
 
   const bs = beds.summary
   const ss = staff.summary
@@ -68,8 +69,10 @@ export default function Beds() {
         title="Beds & Staff"
         subtitle="Aggregate bed capacity and duty staffing across the visible network. Capacity rows only — no patient-level data is ever stored."
       >
-        <button className="btn btn-primary" onClick={load}>Refresh</button>
+        <button className="btn btn-primary" onClick={() => refresh()}>Refresh</button>
       </PageHeader>
+
+      <Freshness generatedAt={beds.generated_at} lastUpdated={lastUpdated} error={pollError} stale={stale} />
 
       <div className="kpi-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
         <KpiCard label="Beds (capacity)" value={bs.total} detail={`${bs.phcs} facilities reporting`} />

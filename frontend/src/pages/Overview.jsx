@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth, isOfficer } from '../auth'
 import { Empty, KpiCard, PageHeader, Panel, Spinner, StatusChip } from '../components/ui'
 import { geoQuery } from '../components/GeoFilters'
+import { Freshness, usePoll } from '../usePoll'
 
 const LEVEL_TITLE = {
   country: 'States',
@@ -22,13 +23,12 @@ export default function Overview() {
 
   const load = useCallback(() => {
     const qs = geoQuery(params)
-    api(`/api/overview?${qs.toString()}`).then(setData).catch((e) => setError(e.message))
+    return api(`/api/overview?${qs.toString()}`).then(setData)
   }, [params])
 
-  useEffect(() => { load() }, [load])
+  const { refresh, lastUpdated, error: pollError, stale } = usePoll(load)
 
-  if (error) return <Empty>{error}</Empty>
-  if (!data) return <Spinner />
+  if (!data) return pollError ? <Empty>{pollError}</Empty> : <Spinner />
 
   const s = data.stats
   const scoped = user.role === 'phc_manager'
@@ -67,7 +67,8 @@ export default function Overview() {
     setBusy(true)
     try {
       await api('/api/settings', { method: 'POST', body: { emergency_mode: !emergency } })
-      load()
+      await refresh()
+      setError('')
     } catch (e) {
       setError(e.message)
     } finally {
@@ -85,6 +86,9 @@ export default function Overview() {
         <Link className="btn" to="/beds">Beds &amp; Staff</Link>
         {!scoped && <Link className="btn btn-primary" to="/redistribution">Redistribution</Link>}
       </PageHeader>
+
+      <Freshness generatedAt={data.generated_at} lastUpdated={lastUpdated} error={pollError} stale={stale} />
+      {error && <div className="stale-banner" role="alert">{error}</div>}
 
       <nav className="crumbs" aria-label="Drill-down path">
         {crumbs.map((c, i) => (

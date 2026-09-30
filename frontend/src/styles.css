@@ -238,6 +238,10 @@ h1,h2,h3{font-family: 'Fraunces', serif; letter-spacing: -0.03em; line-height: 1
   background: var(--danger-soft); border:1px solid #fecaca;
   color: var(--danger); font-size:0.78rem; font-weight:600; margin-bottom:12px;
 }
+.freshness{
+  display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+  font-size:0.72rem; color:var(--muted); margin:-2px 0 12px;
+}
 
 /* Modal */
 .modal-overlay{display:none; position:fixed; inset:0; background: rgba(15,23,42,0.44); backdrop-filter: blur(4px); z-index:200; align-items:center; justify-content:center; padding:18px}

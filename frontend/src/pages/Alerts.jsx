@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import GeoFilters, { geoQuery } from '../components/GeoFilters'
 import { Empty, PageHeader, Panel, Spinner, StatusChip, Toast } from '../components/ui'
+import { Freshness, usePoll } from '../usePoll'
 
 const TABS = [
   ['open', 'Open'],
@@ -20,16 +21,16 @@ export default function Alerts() {
   const load = useCallback(() => {
     const qs = geoQuery(params)
     qs.set('status', tab)
-    api(`/api/alerts?${qs.toString()}`).then(setData).catch((e) => setToast({ message: e.message, error: true }))
+    return api(`/api/alerts?${qs.toString()}`).then(setData)
   }, [tab, params])
 
-  useEffect(() => { load() }, [load])
+  const { refresh, lastUpdated, error: pollError, stale } = usePoll(load)
 
   const act = async (id, action) => {
     try {
       await api(`/api/alerts/${id}/action`, { method: 'POST', body: { action } })
       setToast({ message: `Alert ${action}d.`, error: false })
-      load()
+      refresh()
     } catch (e) {
       setToast({ message: e.message, error: true })
     }
@@ -50,6 +51,8 @@ export default function Alerts() {
         <span className="chip chip-forecast_risk">{counts.forecast_risk || 0} forecast risk</span>
         <span className="chip chip-low">{counts.low || 0} low</span>
       </PageHeader>
+
+      <Freshness generatedAt={data?.generated_at} lastUpdated={lastUpdated} error={pollError} stale={stale} />
 
       <div className="filters-row">
         <GeoFilters params={params} setParams={setParams} />
@@ -72,7 +75,7 @@ export default function Alerts() {
         )}
       </div>
 
-      {!data ? <Spinner /> : alerts.length === 0 ? (
+      {!data ? (pollError ? <Empty>{pollError}</Empty> : <Spinner />) : alerts.length === 0 ? (
         <Empty>{tab === 'open' ? 'No open alerts. Every tracked line has at least 14 days of cover.' : 'No alerts in this view.'}</Empty>
       ) : (
         <div className="alert-list">
