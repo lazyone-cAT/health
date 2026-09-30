@@ -129,48 +129,66 @@ def surplus_qty(stock_qty, adc, target_days=TARGET_DAYS):
     return round(max(0.0, float(stock_qty) - target), 1)
 
 
-def redistribution_suggestions(conn, clause="", params=(), limit=25, donor_clause=None, donor_params=None):
+def _donor_index(conn, clause="", params=()):
+    """medicine_id -> surplus donors in this pool, richest stock first."""
+    rows = conn.execute(
+        f"""
+        SELECT i.phc_id, i.medicine_id, i.stock_qty, i.avg_daily_consumption,
+               p.name AS phc_name, d.name AS district_name, s.name AS state_name
+        FROM inventory i
+        JOIN phc p ON p.phc_id = i.phc_id
+        JOIN district d ON d.district_id = p.district_id
+        JOIN state s ON s.state_id = p.state_id
+        WHERE 1=1 {clause}
+        """,
+        tuple(params),
+    ).fetchall()
+    index = {}
+    for r in rows:
+        surplus = surplus_qty(r["stock_qty"], r["avg_daily_consumption"])
+        if surplus <= 0:
+            continue
+        index.setdefault(r["medicine_id"], []).append(
+            {
+                "phc_id": r["phc_id"],
+                "phc_name": r["phc_name"],
+                "district_name": r["district_name"],
+                "state_name": r["state_name"],
+                "surplus": surplus,
+                "days": days_of_stock(r["stock_qty"], r["avg_daily_consumption"]),
+            }
+        )
+    for med_id in index:
+        index[med_id].sort(key=lambda d: d["days"] or 0, reverse=True)
+    return index
+
+
+def redistribution_suggestions(conn, clause="", params=(), limit=25, donor_pools=None):
     """For every non-OK line, find surplus PHCs that can cover the gap.
 
-    `clause` scopes the PHCs that *need* stock; donors default to the same
-    scope unless a wider donor_clause is given (cross-district search).
+    `clause` scopes the PHCs that *need* stock. `donor_pools` is a list of
+    (label, clause, params) searched narrowest-first: when a line cannot be
+    covered inside its own district the search widens to the state (P4
+    cross-district redistribution). Defaults to a single pool == `clause`.
     """
-    if donor_clause is None:
-        donor_clause, donor_params = clause, params
+    if donor_pools is None:
+        donor_pools = [(None, clause, params)]
+    pools = [(label, _donor_index(conn, c, p)) for label, c, p in donor_pools]
 
     need_rows = conn.execute(
         f"""
         SELECT i.phc_id, i.medicine_id, i.stock_qty, i.avg_daily_consumption,
-               p.name AS phc_name, m.name AS med_name, m.unit
+               p.name AS phc_name, d.name AS district_name, st.name AS state_name,
+               m.name AS med_name, m.unit
         FROM inventory i
         JOIN phc p ON p.phc_id = i.phc_id
+        JOIN district d ON d.district_id = p.district_id
+        JOIN state st ON st.state_id = p.state_id
         JOIN medicine m ON m.medicine_id = i.medicine_id
         WHERE 1=1 {clause}
         """,
         tuple(params),
     ).fetchall()
-
-    donor_rows = conn.execute(
-        f"""
-        SELECT i.phc_id, i.medicine_id, i.stock_qty, i.avg_daily_consumption,
-               p.name AS phc_name
-        FROM inventory i
-        JOIN phc p ON p.phc_id = i.phc_id
-        WHERE 1=1 {donor_clause}
-        """,
-        tuple(donor_params or ()),
-    ).fetchall()
-
-    donors_by_med = {}
-    for r in donor_rows:
-        stock, adc = r["stock_qty"], r["avg_daily_consumption"]
-        surplus = surplus_qty(stock, adc)
-        if surplus > 0:
-            donors_by_med.setdefault(r["medicine_id"], []).append(
-                {"phc_id": r["phc_id"], "phc_name": r["phc_name"], "surplus": surplus, "days": days_of_stock(stock, adc)}
-            )
-    for med_id in donors_by_med:
-        donors_by_med[med_id].sort(key=lambda d: d["days"] or 0, reverse=True)
 
     suggestions = []
     for r in need_rows:
@@ -182,24 +200,41 @@ def redistribution_suggestions(conn, clause="", params=(), limit=25, donor_claus
         if shortfall <= 0:
             shortfall = round(max(1.0, adc), 1)
         donors = []
+        scopes_used = []
         remaining = shortfall
-        for d in donors_by_med.get(r["medicine_id"], []):
-            if d["phc_id"] == r["phc_id"] or remaining <= 0:
+        # Merge pools narrowest-first; a donor only ever appears once so
+        # surplus is never double-counted when the search widens.
+        merged, seen = [], set()
+        for label, index in pools:
+            for d in index.get(r["medicine_id"], []):
+                if d["phc_id"] == r["phc_id"] or d["phc_id"] in seen:
+                    continue
+                seen.add(d["phc_id"])
+                merged.append({**d, "scope": label})
+        for d in merged:
+            if remaining <= 0:
+                break
+            take = round(min(d["surplus"], remaining), 1)
+            if take <= 0:
                 continue
-            take = min(d["surplus"], remaining)
             donors.append({**d, "offer": take})
+            if d["scope"] not in scopes_used:
+                scopes_used.append(d["scope"])
             remaining = round(remaining - take, 1)
         suggestions.append(
             {
                 "phc_id": r["phc_id"],
                 "phc_name": r["phc_name"],
+                "district_name": r["district_name"],
+                "state_name": r["state_name"],
                 "medicine_id": r["medicine_id"],
                 "medicine": r["med_name"],
                 "unit": r["unit"],
                 "status": status,
                 "days_of_stock": days,
                 "shortfall": shortfall,
-                "donors": donors[:3],
+                "donors": donors[:5],
+                "donor_scopes": scopes_used,
                 "can_cover": remaining <= 0,
             }
         )

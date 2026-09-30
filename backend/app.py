@@ -1109,12 +1109,15 @@ def api_redistribution_list():
     own = session_scope()
     q = """
         SELECT r.*, fp.name AS from_phc_name, tp.name AS to_phc_name,
+               fd.name AS from_district_name, td.name AS to_district_name,
                m.name AS medicine, m.unit
         FROM redistribution r
         LEFT JOIN phc fp ON fp.phc_id = r.from_phc_id
         LEFT JOIN phc f ON f.phc_id = r.from_phc_id
+        LEFT JOIN district fd ON fd.district_id = fp.district_id
         LEFT JOIN phc tp ON tp.phc_id = r.to_phc_id
         LEFT JOIN phc p ON p.phc_id = r.to_phc_id
+        LEFT JOIN district td ON td.district_id = tp.district_id
         JOIN medicine m ON m.medicine_id = r.medicine_id
         WHERE 1=1
     """
@@ -1142,15 +1145,98 @@ def api_redistribution_list():
     return jsonify({"redistributions": rows})
 
 
+def _donor_pools():
+    """Donor search pools for suggestions — narrowest first.
+
+    Cross-district redistribution (P4): a district officer can pull stock
+    from anywhere in their state when the home district has no surplus; a
+    state officer widens to the national pool; admins search nationally.
+    """
+    own = session_scope()
+    if own.get("district_id"):
+        return [
+            ("district", "AND p.district_id = ?", (own["district_id"],)),
+            ("state", "AND p.state_id = (SELECT state_id FROM district WHERE district_id = ?)",
+             (own["district_id"],)),
+        ]
+    if own.get("state_id"):
+        return [
+            ("state", "AND p.state_id = ?", (own["state_id"],)),
+            ("national", "", ()),
+        ]
+    return [("national", "", ())]
+
+
 @app.get("/api/redistribution/suggestions")
 @login_required
 @role_required(*OFFICER_ROLES)
 def api_redistribution_suggestions():
     conn = get_db()
     clause, params = scope_clause(geo_scope(conn))
-    suggestions = stock.redistribution_suggestions(conn, clause, params)
+    suggestions = stock.redistribution_suggestions(
+        conn, clause, params, donor_pools=_donor_pools()
+    )
     conn.close()
     return jsonify({"suggestions": suggestions, "target_days": stock.TARGET_DAYS})
+
+
+@app.post("/api/redistribution/auto-propose")
+@login_required
+@role_required(*OFFICER_ROLES)
+def api_auto_propose():
+    """Create `proposed` transfers from every covered suggestion (P4).
+
+    Skips any (donor, receiver, medicine) that already has an open transfer,
+    so running it twice is idempotent.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        limit = int(data.get("limit") or 25)
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit must be an integer"}), 400
+    conn = get_db()
+    clause, params = scope_clause(geo_scope(conn))
+    suggestions = stock.redistribution_suggestions(
+        conn, clause, params, limit=max(limit, 25), donor_pools=_donor_pools()
+    )
+    created, skipped = [], 0
+    for s in suggestions:
+        for d in s["donors"]:
+            if d["offer"] <= 0:
+                continue
+            if len(created) >= limit:
+                break
+            existing = conn.execute(
+                """SELECT id FROM redistribution
+                   WHERE from_phc_id = ? AND to_phc_id = ? AND medicine_id = ?
+                     AND status IN ('proposed','accepted','dispatched')""",
+                (d["phc_id"], s["phc_id"], s["medicine_id"]),
+            ).fetchone()
+            if existing:
+                skipped += 1
+                continue
+            cross = f" (cross-district: {d['district_name']})" if d["district_name"] != s["district_name"] else ""
+            reason = (
+                f"Auto-proposed: {s['shortfall']} {s['unit']} of {s['medicine']} to cover "
+                f"{s['status']} at {s['phc_name']} from {d['phc_name']}{cross}"
+            )
+            cur = conn.execute(
+                """INSERT INTO redistribution
+                   (from_phc_id, to_phc_id, medicine_id, quantity, reason, created_by, status)
+                   VALUES (?,?,?,?,?,?, 'proposed')""",
+                (d["phc_id"], s["phc_id"], s["medicine_id"], d["offer"], reason,
+                 session.get("username")),
+            )
+            created.append({"id": cur.lastrowid, "from_phc": d["phc_name"], "to_phc": s["phc_name"],
+                            "medicine": s["medicine"], "quantity": d["offer"],
+                            "scope": d.get("scope")})
+    log_audit(
+        conn, "redistribution_auto_propose",
+        f"Auto-proposed {len(created)} transfer(s) from {len(suggestions)} suggestion(s), {skipped} skipped as duplicates",
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"created": len(created), "skipped": skipped, "transfers": created})
 
 
 @app.post("/api/redistribution")
@@ -1197,13 +1283,25 @@ def api_redistribution_create():
     return jsonify({"status": "ok"})
 
 
+# proposed -> accepted (approve) / rejected (reject) / cancelled
+# accepted -> dispatched -> delivered  (delivered moves the stock)
+STATUS_FLOW = {
+    "proposed": {"accepted", "rejected", "cancelled"},
+    "accepted": {"dispatched", "cancelled"},
+    "dispatched": {"delivered"},
+    "delivered": set(),
+    "rejected": set(),
+    "cancelled": set(),
+}
+
+
 @app.post("/api/redistribution/<int:transfer_id>/status")
 @login_required
 @role_required(*EDITOR_ROLES)
 def api_redistribution_status(transfer_id):
     data = request.get_json(silent=True) or {}
     new_status = data.get("status")
-    allowed = ("accepted", "dispatched", "delivered", "cancelled")
+    allowed = tuple(sorted({s for moves in STATUS_FLOW.values() for s in moves}))
     if new_status not in allowed:
         return jsonify({"error": f"status must be one of {', '.join(allowed)}"}), 400
 
@@ -1215,6 +1313,9 @@ def api_redistribution_status(transfer_id):
     if not (_in_scope(conn, row["to_phc_id"]) or _in_scope(conn, row["from_phc_id"] or -1)):
         conn.close()
         return jsonify({"error": "Forbidden"}), 403
+    if new_status not in STATUS_FLOW.get(row["status"], set()):
+        conn.close()
+        return jsonify({"error": f"Cannot move a {row['status']} transfer to {new_status}"}), 400
 
     conn.execute(
         "UPDATE redistribution SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
