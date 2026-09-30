@@ -37,4 +37,5 @@ export function useAuth() {
   return useContext(AuthContext)
 }
 
-export const isOfficer = (user) => user && (user.role === 'admin' || user.role === 'district_officer')
+export const isOfficer = (user) =>
+  Boolean(user) && ['admin', 'state_officer', 'district_officer'].includes(user.role)

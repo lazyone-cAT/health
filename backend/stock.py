@@ -121,20 +121,40 @@ def surplus_qty(stock_qty, adc, target_days=TARGET_DAYS):
     return round(max(0.0, float(stock_qty) - target), 1)
 
 
-def redistribution_suggestions(conn, limit=25):
-    """For every non-OK line, find surplus PHCs that can cover the gap."""
+def redistribution_suggestions(conn, clause="", params=(), limit=25, donor_clause=None, donor_params=None):
+    """For every non-OK line, find surplus PHCs that can cover the gap.
+
+    `clause` scopes the PHCs that *need* stock; donors default to the same
+    scope unless a wider donor_clause is given (cross-district search).
+    """
+    if donor_clause is None:
+        donor_clause, donor_params = clause, params
+
     need_rows = conn.execute(
-        """
+        f"""
         SELECT i.phc_id, i.medicine_id, i.stock_qty, i.avg_daily_consumption,
                p.name AS phc_name, m.name AS med_name, m.unit
         FROM inventory i
         JOIN phc p ON p.phc_id = i.phc_id
         JOIN medicine m ON m.medicine_id = i.medicine_id
-        """
+        WHERE 1=1 {clause}
+        """,
+        tuple(params),
+    ).fetchall()
+
+    donor_rows = conn.execute(
+        f"""
+        SELECT i.phc_id, i.medicine_id, i.stock_qty, i.avg_daily_consumption,
+               p.name AS phc_name
+        FROM inventory i
+        JOIN phc p ON p.phc_id = i.phc_id
+        WHERE 1=1 {donor_clause}
+        """,
+        tuple(donor_params or ()),
     ).fetchall()
 
     donors_by_med = {}
-    for r in need_rows:
+    for r in donor_rows:
         stock, adc = r["stock_qty"], r["avg_daily_consumption"]
         surplus = surplus_qty(stock, adc)
         if surplus > 0:
@@ -182,27 +202,50 @@ def redistribution_suggestions(conn, limit=25):
     return suggestions
 
 
-def summary_stats(conn):
+def summary_stats(conn, clause="", params=()):
+    """Aggregate stock position over the rows visible to the caller."""
+    where = clause or ""
+    args = tuple(params or ())
     total, stock_out, critical, low, covered = conn.execute(
-        """
+        f"""
         SELECT COUNT(*),
-               SUM(CASE WHEN stock_qty <= 0 THEN 1 ELSE 0 END),
-               SUM(CASE WHEN stock_qty > 0 AND avg_daily_consumption > 0
-                         AND stock_qty / avg_daily_consumption < ? THEN 1 ELSE 0 END),
-               SUM(CASE WHEN stock_qty > 0 AND avg_daily_consumption > 0
-                         AND stock_qty / avg_daily_consumption >= ? AND stock_qty / avg_daily_consumption < ?
+               SUM(CASE WHEN i.stock_qty <= 0 THEN 1 ELSE 0 END),
+               SUM(CASE WHEN i.stock_qty > 0 AND i.avg_daily_consumption > 0
+                         AND i.stock_qty / i.avg_daily_consumption < ? THEN 1 ELSE 0 END),
+               SUM(CASE WHEN i.stock_qty > 0 AND i.avg_daily_consumption > 0
+                         AND i.stock_qty / i.avg_daily_consumption >= ? AND i.stock_qty / i.avg_daily_consumption < ?
                         THEN 1 ELSE 0 END),
-               SUM(CASE WHEN avg_daily_consumption > 0 THEN stock_qty / avg_daily_consumption ELSE NULL END)
-        FROM inventory
+               SUM(CASE WHEN i.avg_daily_consumption > 0 THEN i.stock_qty / i.avg_daily_consumption ELSE NULL END)
+        FROM inventory i
+        JOIN phc p ON p.phc_id = i.phc_id
+        WHERE 1=1 {where}
         """,
-        (CRITICAL_DAYS, CRITICAL_DAYS, LOW_DAYS, ),
+        (CRITICAL_DAYS, CRITICAL_DAYS, LOW_DAYS) + args,
     ).fetchone()
 
-    open_alerts = conn.execute("SELECT COUNT(*) FROM alerts WHERE status IN ('open','acknowledged')").fetchone()[0]
-    with_adc = conn.execute("SELECT COUNT(*) FROM inventory WHERE avg_daily_consumption > 0").fetchone()[0] or 0
+    open_alerts = conn.execute(
+        f"SELECT COUNT(*) FROM alerts a JOIN phc p ON p.phc_id = a.phc_id"
+        f" WHERE a.status IN ('open','acknowledged') {where}",
+        args,
+    ).fetchone()[0]
+    with_adc = conn.execute(
+        f"SELECT COUNT(*) FROM inventory i JOIN phc p ON p.phc_id = i.phc_id"
+        f" WHERE i.avg_daily_consumption > 0 {where}",
+        args,
+    ).fetchone()[0] or 0
+    phcs, districts, states = conn.execute(
+        f"""
+        SELECT COUNT(*), COUNT(DISTINCT district_id), COUNT(DISTINCT state_id)
+        FROM phc p WHERE 1=1 {where}
+        """,
+        args,
+    ).fetchone()
+    medicines = conn.execute("SELECT COUNT(*) FROM medicine").fetchone()[0]
     return {
-        "phcs": conn.execute("SELECT COUNT(*) FROM phc").fetchone()[0],
-        "medicines": conn.execute("SELECT COUNT(*) FROM medicine").fetchone()[0],
+        "states": states or 0,
+        "districts": districts or 0,
+        "phcs": phcs or 0,
+        "medicines": medicines,
         "lines": total or 0,
         "stock_out": stock_out or 0,
         "critical": critical or 0,

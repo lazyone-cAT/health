@@ -4,7 +4,8 @@ from functools import wraps
 
 from flask import jsonify, session
 
-STAFF_ROLES = ("admin", "district_officer")
+STAFF_ROLES = ("admin", "district_officer", "state_officer")
+OFFICER_ROLES = ("admin", "district_officer", "state_officer")
 
 
 def hash_password(p: str) -> str:
@@ -13,8 +14,16 @@ def hash_password(p: str) -> str:
 
 def log_audit(conn, action, detail, user_id=None, username=None):
     conn.execute(
-        "INSERT INTO audit_log (user_id, username, action, detail) VALUES (?,?,?,?)",
-        (user_id, username or session.get("username"), action, detail),
+        "INSERT INTO audit_log (user_id, username, action, detail, state_id, district_id)"
+        " VALUES (?,?,?,?,?,?)",
+        (
+            user_id,
+            username or session.get("username"),
+            action,
+            detail,
+            session.get("state_id"),
+            session.get("district_id"),
+        ),
     )
 
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../auth'
+import GeoFilters, { geoQuery } from '../components/GeoFilters'
 import {
   CoverageBar, Empty, Icons, Modal, PageHeader, Spinner, StatusChip, Toast,
 } from '../components/ui'
@@ -18,26 +19,23 @@ export default function Inventory() {
   const { user } = useAuth()
   const [params, setParams] = useSearchParams()
   const [rows, setRows] = useState(null)
-  const [phcs, setPhcs] = useState([])
   const [q, setQ] = useState(params.get('q') || '')
   const [status, setStatus] = useState('all')
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState({ stock_qty: '', avg_daily_consumption: '' })
   const [toast, setToast] = useState({ message: '', error: false })
-  const canEdit = user.role === 'admin' || user.role === 'district_officer' || user.role === 'phc_manager'
-
-  const phcId = params.get('phc_id') || ''
+  const canEdit = ['admin', 'district_officer', 'state_officer', 'phc_manager'].includes(user.role)
 
   const load = useCallback(() => {
-    const qs = new URLSearchParams()
+    const qs = geoQuery(params)
     if (q) qs.set('q', q)
     if (status !== 'all') qs.set('status', status)
-    if (phcId) qs.set('phc_id', phcId)
-    api(`/api/inventory?${qs.toString()}`).then((d) => setRows(d.inventory)).catch((e) => setToast({ message: e.message, error: true }))
-  }, [q, status, phcId])
+    api(`/api/inventory?${qs.toString()}`)
+      .then((d) => setRows(d.inventory))
+      .catch((e) => setToast({ message: e.message, error: true }))
+  }, [q, status, params])
 
   useEffect(() => { load() }, [load])
-  useEffect(() => { api('/api/phcs').then((d) => setPhcs(d.phcs)).catch(() => {}) }, [])
 
   const openEdit = (row) => {
     setEditing(row)
@@ -78,7 +76,7 @@ export default function Inventory() {
     <>
       <PageHeader
         title="Inventory"
-        subtitle="Every PHC × medicine line with days of cover, computed as stock ÷ average daily consumption."
+        subtitle="Every PHC × medicine line with days of cover, computed as stock ÷ average daily consumption. Filters cascade state → district → PHC."
       >
         <button className="btn" onClick={exportCsv}>Export CSV</button>
         <button className="btn btn-primary" onClick={load}>Refresh</button>
@@ -90,11 +88,7 @@ export default function Inventory() {
           <input placeholder="Search medicine or PHC…" value={q}
             onChange={(e) => setQ(e.target.value)} />
         </div>
-        <select className="form-select" value={phcId}
-          onChange={(e) => setParams(e.target.value ? { phc_id: e.target.value } : {})}>
-          <option value="">All PHCs</option>
-          {phcs.map((p) => <option key={p.phc_id} value={p.phc_id}>{p.name}</option>)}
-        </select>
+        <GeoFilters params={params} setParams={setParams} />
         <select className="form-select" value={status} onChange={(e) => setStatus(e.target.value)}>
           {STATUS_FILTERS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
@@ -113,7 +107,7 @@ export default function Inventory() {
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id} className={r.status === 'stock_out' ? 'conflict-row' : ''}>
-                  <td>{r.phc_name}<div style={{ fontSize: '0.66rem', color: 'var(--muted)' }}>{r.block} block</div></td>
+                  <td>{r.phc_name}<div style={{ fontSize: '0.66rem', color: 'var(--muted)' }}>{r.district_name} · {r.block} block</div></td>
                   <td style={{ fontWeight: 600 }}>{r.medicine}</td>
                   <td>{r.category}</td>
                   <td className="mono">{r.stock_qty}</td>

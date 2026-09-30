@@ -71,7 +71,7 @@ export default function Redistribution() {
 
       <div className="grid-2">
         <Panel title="Suggestions — who needs what" icon="swap"
-          right={officer ? <span style={{ fontSize: '0.68rem', color: 'var(--muted)' }}>district officers only</span> : <span style={{ fontSize: '0.68rem', color: 'var(--muted)' }}>PHC in-charge view</span>}>
+          right={officer ? <span style={{ fontSize: '0.68rem', color: 'var(--muted)' }}>officers only</span> : <span style={{ fontSize: '0.68rem', color: 'var(--muted)' }}>PHC in-charge view</span>}>
           {!suggestions ? <Spinner /> : suggestions.length === 0 ? (
             <Empty>No line is below 14 days of cover — nothing needs redistributing.</Empty>
           ) : suggestions.map((s, i) => (

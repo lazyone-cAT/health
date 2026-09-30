@@ -1,12 +1,21 @@
-"""PHC Medicine Inventory — District Officer Command Center (Flask JSON API)."""
+"""PHC Medicine Inventory — Federated Health Supply-Chain Command Center (Flask JSON API).
+
+Scoping model (scope_clause / geo_scope):
+    admin          -> no restriction (India-wide)
+    state_officer  -> own state
+    district_officer -> own district
+    phc_manager    -> own PHC only
+Query params (state_id, district_id, phc_id) drill down further but can never
+widen a caller's scope — anything outside it is a 403.
+"""
 import os
 
-from flask import Flask, jsonify, request, send_from_directory, session
+from flask import Flask, abort, jsonify, request, send_from_directory, session
 
 import db as database
 import stock
 import upload as uploader
-from auth import hash_password, login_required, log_audit, role_required
+from auth import OFFICER_ROLES, hash_password, log_audit, login_required, role_required
 from federated import FEDERATED_DEMO
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,7 +25,7 @@ app = Flask(__name__, static_folder=None)
 app.secret_key = os.environ.get("SECRET_KEY", "phc-inventory-secret-2026")
 app.config.update(SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_HTTPONLY=True)
 
-PHC_MANAGER_ROLES = ("district_officer", "phc_manager")
+EDITOR_ROLES = ("district_officer", "state_officer", "phc_manager")
 
 # Seed the database at import time so gunicorn (which imports this module
 # instead of running it as __main__) also gets schema + seed data.
@@ -28,18 +37,120 @@ def get_db():
     return database.get_db()
 
 
-def current_scope():
-    """phc_manager -> own PHC only. Everyone else -> district-wide (None)."""
-    if session.get("role") == "phc_manager":
-        return session.get("phc_id")
-    return None
+@app.errorhandler(403)
+def _forbidden(e):
+    return jsonify({"error": getattr(e, "description", "Forbidden")}), 403
 
 
-def scoped_phc_clause(alias="i"):
-    phc_id = current_scope()
-    if phc_id is None:
-        return "", ()
-    return f" AND {alias}.phc_id = ?", (phc_id,)
+# ============================== Scoping ==============================
+
+def session_scope():
+    """Restriction implied by the caller's role alone (no query params).
+
+    A 0 sentinel means "matches nothing" — used when an account is missing its
+    state/district/PHC assignment rather than accidentally falling open.
+    """
+    role = session.get("role")
+    if role == "state_officer":
+        return {"state_id": session.get("state_id") or 0}
+    if role == "district_officer":
+        return {"district_id": session.get("district_id") or 0}
+    if role == "phc_manager":
+        return {"phc_id": session.get("phc_id") or 0}
+    return {}
+
+
+def geo_scope(conn):
+    """Merge the role scope with drill-down query params, validating that the
+    requested geography is inside the caller's scope."""
+    own = session_scope()
+    wanted = {}
+    for key in ("state_id", "district_id", "phc_id"):
+        val = request.args.get(key, type=int)
+        if val:
+            wanted[key] = val
+
+    for key, val in wanted.items():
+        if key in own and own[key] != val:
+            abort(403, description=f"{key}={val} is outside your scope")
+
+    if "phc_id" in wanted and "phc_id" not in own:
+        row = conn.execute(
+            "SELECT state_id, district_id FROM phc WHERE phc_id = ?", (wanted["phc_id"],)
+        ).fetchone()
+        if not row:
+            abort(403, description=f"phc_id={wanted['phc_id']} does not exist")
+        if own.get("state_id") and row["state_id"] != own["state_id"]:
+            abort(403, description="PHC is outside your state")
+        if own.get("district_id") and row["district_id"] != own["district_id"]:
+            abort(403, description="PHC is outside your district")
+
+    if "district_id" in wanted and "district_id" not in own:
+        row = conn.execute(
+            "SELECT state_id FROM district WHERE district_id = ?", (wanted["district_id"],)
+        ).fetchone()
+        if not row:
+            abort(403, description=f"district_id={wanted['district_id']} does not exist")
+        if own.get("state_id") and row["state_id"] != own["state_id"]:
+            abort(403, description="District is outside your state")
+        if own.get("phc_id"):
+            abort(403, description="PHC in-charges cannot select a district")
+
+    if "state_id" in wanted and "state_id" not in own:
+        if own.get("district_id"):
+            row = conn.execute(
+                "SELECT state_id FROM district WHERE district_id = ?", (own["district_id"],)
+            ).fetchone()
+            if not row or row["state_id"] != wanted["state_id"]:
+                abort(403, description="State is outside your scope")
+        elif own.get("phc_id"):
+            row = conn.execute(
+                "SELECT state_id FROM phc WHERE phc_id = ?", (own["phc_id"],)
+            ).fetchone()
+            if not row or row["state_id"] != wanted["state_id"]:
+                abort(403, description="State is outside your scope")
+
+    return {**own, **wanted}
+
+
+def scope_clause(filters, alias="p"):
+    """SQL fragment restricting a query joined to the `phc` table (alias)."""
+    sql, params = "", []
+    if filters.get("state_id") is not None:
+        sql += f" AND {alias}.state_id = ?"
+        params.append(filters["state_id"])
+    if filters.get("district_id") is not None:
+        sql += f" AND {alias}.district_id = ?"
+        params.append(filters["district_id"])
+    if filters.get("phc_id") is not None:
+        sql += f" AND {alias}.phc_id = ?"
+        params.append(filters["phc_id"])
+    return sql, tuple(params)
+
+
+def scope_level(filters):
+    if filters.get("phc_id") is not None:
+        return "phc"
+    if filters.get("district_id") is not None:
+        return "district"
+    if filters.get("state_id") is not None:
+        return "state"
+    return "country"
+
+
+def _in_scope(conn, phc_id):
+    """True when the PHC row is visible to the caller."""
+    row = conn.execute("SELECT state_id, district_id FROM phc WHERE phc_id = ?", (phc_id,)).fetchone()
+    if not row:
+        return False
+    own = session_scope()
+    if not own:
+        return True
+    if "phc_id" in own:
+        return own["phc_id"] == phc_id
+    if "district_id" in own:
+        return own["district_id"] == row["district_id"]
+    return own.get("state_id") == row["state_id"]
 
 
 # ============================== Auth ==============================
@@ -66,6 +177,8 @@ def api_login():
     session["full_name"] = user["full_name"]
     session["role"] = user["role"]
     session["phc_id"] = user["phc_id"]
+    session["state_id"] = user["state_id"]
+    session["district_id"] = user["district_id"]
     log_audit(conn, "login", f'{user["role"]} logged in', user["id"], user["username"])
     conn.commit()
     conn.close()
@@ -97,23 +210,111 @@ def api_me():
 
 
 def _user_payload(user):
+    conn = get_db()
+    state_name = district_name = None
+    if user["state_id"]:
+        row = conn.execute("SELECT name FROM state WHERE state_id = ?", (user["state_id"],)).fetchone()
+        state_name = row["name"] if row else None
+    if user["district_id"]:
+        row = conn.execute("SELECT name FROM district WHERE district_id = ?", (user["district_id"],)).fetchone()
+        district_name = row["name"] if row else None
+    phc_name = None
+    if user["phc_id"]:
+        row = conn.execute("SELECT name FROM phc WHERE phc_id = ?", (user["phc_id"],)).fetchone()
+        phc_name = row["name"] if row else None
+    conn.close()
     return {
         "id": user["id"],
         "username": user["username"],
         "full_name": user["full_name"],
         "role": user["role"],
         "phc_id": user["phc_id"],
-        "phc_name": _phc_name(user["phc_id"]),
+        "phc_name": phc_name,
+        "state_id": user["state_id"],
+        "state_name": state_name,
+        "district_id": user["district_id"],
+        "district_name": district_name,
     }
 
 
-def _phc_name(phc_id):
-    if not phc_id:
-        return None
+# ============================== Geography ==============================
+
+@app.get("/api/geography")
+@login_required
+def api_geography():
     conn = get_db()
-    row = conn.execute("SELECT name FROM phc WHERE phc_id = ?", (phc_id,)).fetchone()
+    own = session_scope()
+    state_f = own.get("state_id")
+    district_f = own.get("district_id")
+    phc_f = own.get("phc_id")
+    if phc_f:
+        row = conn.execute(
+            "SELECT state_id, district_id FROM phc WHERE phc_id = ?", (phc_f,)
+        ).fetchone()
+        if row:
+            state_f, district_f = row["state_id"], row["district_id"]
+    elif district_f and state_f is None:
+        row = conn.execute(
+            "SELECT state_id FROM district WHERE district_id = ?", (district_f,)
+        ).fetchone()
+        if row:
+            state_f = row["state_id"]
+
+    states = conn.execute(
+        """
+        SELECT s.state_id, s.name, s.code,
+               (SELECT COUNT(*) FROM district d WHERE d.state_id = s.state_id) AS districts,
+               (SELECT COUNT(*) FROM phc p WHERE p.state_id = s.state_id) AS phcs
+        FROM state s
+        WHERE ? IS NULL OR s.state_id = ?
+        ORDER BY s.name
+        """,
+        (state_f, state_f),
+    ).fetchall()
+
+    out = []
+    for s in states:
+        districts = conn.execute(
+            """
+            SELECT d.district_id, d.name,
+                   (SELECT COUNT(*) FROM phc p WHERE p.district_id = d.district_id) AS phcs
+            FROM district d
+            WHERE d.state_id = ? AND (? IS NULL OR d.district_id = ?)
+            ORDER BY d.name
+            """,
+            (s["state_id"], district_f, district_f),
+        ).fetchall()
+        ds = []
+        for d in districts:
+            phcs = conn.execute(
+                "SELECT phc_id, name FROM phc WHERE district_id = ?"
+                " AND (? IS NULL OR phc_id = ?) ORDER BY name",
+                (d["district_id"], phc_f, phc_f),
+            ).fetchall()
+            ds.append(
+                {
+                    "district_id": d["district_id"],
+                    "name": d["name"],
+                    "phcs": d["phcs"],
+                    "facilities": [dict(p) for p in phcs],
+                }
+            )
+        out.append(
+            {
+                "state_id": s["state_id"],
+                "name": s["name"],
+                "code": s["code"],
+                "districts": ds,
+            }
+        )
     conn.close()
-    return row["name"] if row else None
+    return jsonify(
+        {
+            "states": out,
+            "level": scope_level(own),
+            "scope": {"state_id": state_f, "district_id": district_f, "phc_id": phc_f},
+        }
+    )
 
 
 # ============================== Overview ==============================
@@ -122,37 +323,136 @@ def _phc_name(phc_id):
 @login_required
 def api_overview():
     conn = get_db()
-    scope = current_scope()
-    stats = stock.summary_stats(conn)
-    phcs = _phc_rollup(conn, scope)
+    filters = geo_scope(conn)
+    clause, params = scope_clause(filters)
+    level = scope_level(filters)
 
-    q = """
+    stats = stock.summary_stats(conn, clause, params)
+    children = _rollup(conn, level, clause, params)
+    crumbs, geo_names = _breadcrumb(conn, filters)
+
+    q = f"""
         SELECT a.id, a.alert_type, a.severity, a.days_of_stock, a.message, a.status,
                a.created_at, p.name AS phc_name, m.name AS medicine, m.unit
         FROM alerts a
         JOIN phc p ON p.phc_id = a.phc_id
         JOIN medicine m ON m.medicine_id = a.medicine_id
-        WHERE a.status IN ('open','acknowledged')
+        WHERE a.status IN ('open','acknowledged') {clause}
     """
-    params = []
-    if scope:
-        q += " AND a.phc_id = ?"
-        params.append(scope)
     order = "CASE a.severity WHEN 'stock_out' THEN 0 WHEN 'critical' THEN 1 ELSE 2 END, a.days_of_stock ASC"
     alerts = [dict(r) for r in conn.execute(q + f" ORDER BY {order} LIMIT 8", params)]
 
-    by_severity = _alert_counts(conn, scope)
+    by_severity = _alert_counts(conn, clause, params)
+    generated_at = conn.execute("SELECT CURRENT_TIMESTAMP AS ts").fetchone()["ts"]
     conn.close()
 
-    if scope:
-        stats = {k: v for k, v in stats.items() if k in ("lines", "stock_out", "critical", "low", "open_alerts", "avg_days_cover", "medicines")}
-        stats["phcs"] = 1
-    return jsonify({"stats": stats, "phcs": phcs, "top_alerts": alerts, "alerts_by_severity": by_severity})
+    return jsonify(
+        {
+            "level": level,
+            "geo": filters,
+            "geo_names": geo_names,
+            "breadcrumb": crumbs,
+            "stats": stats,
+            "children": children,
+            "top_alerts": alerts,
+            "alerts_by_severity": by_severity,
+            "generated_at": generated_at,
+        }
+    )
 
 
-def _phc_rollup(conn, scope):
-    q = """
-        SELECT p.phc_id, p.name, p.block, p.beds,
+def _rollup(conn, level, clause, params):
+    """Aggregate inventory to the level *below* the current one."""
+    if level == "country":
+        idc, nc, join, extra = "p.state_id", "s.name", " JOIN state s ON s.state_id = p.state_id", ", s.code AS code"
+    elif level == "state":
+        idc, nc, join, extra = "p.district_id", "d.name", " JOIN district d ON d.district_id = p.district_id", ""
+    else:
+        idc, nc, join, extra = (
+            "p.phc_id", "p.name", "",
+            ", p.block AS block, p.beds AS beds, p.state_id, p.district_id",
+        )
+    q = f"""
+        SELECT {idc} AS id, {nc} AS name{extra},
+               COUNT(DISTINCT p.phc_id) AS phcs,
+               COUNT(i.id) AS lines,
+               SUM(CASE WHEN i.stock_qty <= 0 THEN 1 ELSE 0 END) AS stock_out,
+               SUM(CASE WHEN i.stock_qty > 0 AND i.avg_daily_consumption > 0
+                         AND i.stock_qty / i.avg_daily_consumption < ? THEN 1 ELSE 0 END) AS critical,
+               SUM(CASE WHEN i.stock_qty > 0 AND i.avg_daily_consumption > 0
+                         AND i.stock_qty / i.avg_daily_consumption >= ?
+                         AND i.stock_qty / i.avg_daily_consumption < ? THEN 1 ELSE 0 END) AS low,
+               AVG(CASE WHEN i.avg_daily_consumption > 0
+                        THEN i.stock_qty / i.avg_daily_consumption END) AS avg_days
+        FROM inventory i
+        JOIN phc p ON p.phc_id = i.phc_id{join}
+        WHERE 1=1 {clause}
+        GROUP BY {idc}
+        ORDER BY {nc}
+    """
+    args = (stock.CRITICAL_DAYS, stock.CRITICAL_DAYS, stock.LOW_DAYS) + tuple(params)
+    rows = []
+    for r in conn.execute(q, args):
+        item = dict(r)
+        item["avg_days"] = round(item["avg_days"], 1) if item["avg_days"] is not None else None
+        rows.append(item)
+    return rows
+
+
+def _breadcrumb(conn, filters):
+    """Full path from India down to the current node, whatever level was requested."""
+    state_id = filters.get("state_id")
+    district_id = filters.get("district_id")
+    phc_id = filters.get("phc_id")
+    names = {"state": None, "district": None, "phc": None}
+
+    if phc_id:
+        row = conn.execute(
+            "SELECT name, district_id, state_id FROM phc WHERE phc_id = ?", (phc_id,)
+        ).fetchone()
+        if row:
+            names["phc"] = row["name"]
+            state_id = state_id or row["state_id"]
+            district_id = district_id or row["district_id"]
+    if district_id:
+        row = conn.execute(
+            "SELECT name, state_id FROM district WHERE district_id = ?", (district_id,)
+        ).fetchone()
+        if row:
+            names["district"] = row["name"]
+            state_id = state_id or row["state_id"]
+    if state_id:
+        row = conn.execute("SELECT name FROM state WHERE state_id = ?", (state_id,)).fetchone()
+        names["state"] = row["name"] if row else None
+
+    crumbs = [{"level": "country", "label": "India", "params": {}}]
+    if state_id:
+        crumbs.append({"level": "state", "label": names["state"] or "State",
+                       "params": {"state_id": state_id}})
+    if district_id:
+        crumbs.append({"level": "district", "label": names["district"] or "District",
+                       "params": {"state_id": state_id, "district_id": district_id}})
+    if phc_id:
+        crumbs.append({"level": "phc", "label": names["phc"] or "PHC",
+                       "params": {"phc_id": phc_id}})
+    return crumbs, names
+
+
+def _alert_counts(conn, clause, params):
+    q = f"SELECT severity, COUNT(*) AS n FROM alerts a JOIN phc p ON p.phc_id = a.phc_id" \
+        f" WHERE a.status IN ('open','acknowledged') {clause} GROUP BY severity"
+    out = {"stock_out": 0, "critical": 0, "low": 0}
+    for r in conn.execute(q, params):
+        out[r["severity"]] = r["n"]
+    return out
+
+
+# ============================== PHCs ==============================
+
+def _phc_rollup(conn, clause, params):
+    q = f"""
+        SELECT p.phc_id, p.name, p.block, p.beds, p.state_id, p.district_id,
+               s.name AS state_name, d.name AS district_name,
                COUNT(i.id) AS lines,
                SUM(CASE WHEN i.stock_qty <= 0 THEN 1 ELSE 0 END) AS stock_out,
                SUM(CASE WHEN i.stock_qty > 0 AND i.avg_daily_consumption > 0
@@ -163,37 +463,27 @@ def _phc_rollup(conn, scope):
                AVG(CASE WHEN i.avg_daily_consumption > 0
                         THEN i.stock_qty / i.avg_daily_consumption END) AS avg_days
         FROM phc p
+        JOIN state s ON s.state_id = p.state_id
+        JOIN district d ON d.district_id = p.district_id
         LEFT JOIN inventory i ON i.phc_id = p.phc_id
+        WHERE 1=1 {clause}
+        GROUP BY p.phc_id ORDER BY p.name
     """
-    params = [stock.CRITICAL_DAYS, stock.CRITICAL_DAYS, stock.LOW_DAYS]
-    if scope:
-        q += " WHERE p.phc_id = ?"
-        params.append(scope)
-    q += " GROUP BY p.phc_id ORDER BY p.name"
-    return [dict(r) for r in conn.execute(q, params)]
+    args = (stock.CRITICAL_DAYS, stock.CRITICAL_DAYS, stock.LOW_DAYS) + tuple(params)
+    rows = []
+    for r in conn.execute(q, args):
+        item = dict(r)
+        item["avg_days"] = round(item["avg_days"], 1) if item["avg_days"] is not None else None
+        rows.append(item)
+    return rows
 
-
-def _alert_counts(conn, scope):
-    q = "SELECT severity, COUNT(*) AS n FROM alerts WHERE status IN ('open','acknowledged')"
-    params = []
-    if scope:
-        q += " AND phc_id = ?"
-        params.append(scope)
-    q += " GROUP BY severity"
-    out = {"stock_out": 0, "critical": 0, "low": 0}
-    for r in conn.execute(q, params):
-        out[r["severity"]] = r["n"]
-    return out
-
-
-# ============================== PHCs ==============================
 
 @app.get("/api/phcs")
 @login_required
 def api_phcs():
     conn = get_db()
-    scope = current_scope()
-    rows = _phc_rollup(conn, scope)
+    clause, params = scope_clause(geo_scope(conn))
+    rows = _phc_rollup(conn, clause, params)
     conn.close()
     return jsonify({"phcs": rows})
 
@@ -201,45 +491,46 @@ def api_phcs():
 @app.get("/api/phcs/<int:phc_id>")
 @login_required
 def api_phc_detail(phc_id):
-    if current_scope() not in (None, phc_id):
-        return jsonify({"error": "Forbidden"}), 403
     conn = get_db()
+    if not _in_scope(conn, phc_id):
+        conn.close()
+        return jsonify({"error": "Forbidden"}), 403
     phc = conn.execute("SELECT * FROM phc WHERE phc_id = ?", (phc_id,)).fetchone()
     if not phc:
         conn.close()
         return jsonify({"error": "PHC not found"}), 404
-    lines = _inventory_rows(conn, {"phc_id": phc_id})
+    lines = _inventory_rows(conn, " AND i.phc_id = ?", (phc_id,), {})
     conn.close()
     return jsonify({"phc": dict(phc), "inventory": lines})
 
 
 # ============================== Inventory ==============================
 
-def _inventory_rows(conn, filters):
-    q = """
-        SELECT i.id, i.phc_id, p.name AS phc_name, p.block,
+def _inventory_rows(conn, clause, params, filters):
+    q = f"""
+        SELECT i.id, i.phc_id, p.name AS phc_name, p.block, p.state_id, p.district_id,
+               s.name AS state_name, d.name AS district_name,
                i.medicine_id, m.name AS medicine, m.category, m.unit, m.essential,
                i.stock_qty, i.avg_daily_consumption, i.updated_at
         FROM inventory i
         JOIN phc p ON p.phc_id = i.phc_id
+        JOIN state s ON s.state_id = p.state_id
+        JOIN district d ON d.district_id = p.district_id
         JOIN medicine m ON m.medicine_id = i.medicine_id
-        WHERE 1=1
+        WHERE 1=1 {clause}
     """
-    params = []
-    if filters.get("phc_id"):
-        q += " AND i.phc_id = ?"
-        params.append(filters["phc_id"])
+    args = list(params)
     if filters.get("medicine_id"):
         q += " AND i.medicine_id = ?"
-        params.append(filters["medicine_id"])
+        args.append(filters["medicine_id"])
     if filters.get("q"):
         q += " AND (m.name LIKE ? OR p.name LIKE ?)"
         like = f'%{filters["q"]}%'
-        params += [like, like]
+        args += [like, like]
     q += " ORDER BY p.name, m.name"
 
     rows = []
-    for r in conn.execute(q, params):
+    for r in conn.execute(q, args):
         item = dict(r)
         status, days = stock.evaluate_row(item["stock_qty"], item["avg_daily_consumption"])
         item["days_of_stock"] = days
@@ -256,22 +547,21 @@ def _inventory_rows(conn, filters):
 @login_required
 def api_inventory():
     conn = get_db()
+    clause, params = scope_clause(geo_scope(conn))
     filters = {
-        "phc_id": request.args.get("phc_id", type=int),
         "medicine_id": request.args.get("medicine_id", type=int),
         "q": (request.args.get("q") or "").strip(),
         "status": request.args.get("status", "all"),
     }
-    if current_scope():
-        filters["phc_id"] = current_scope()
-    rows = _inventory_rows(conn, filters)
+    rows = _inventory_rows(conn, clause, params, filters)
+    generated_at = conn.execute("SELECT CURRENT_TIMESTAMP AS ts").fetchone()["ts"]
     conn.close()
-    return jsonify({"inventory": rows, "count": len(rows)})
+    return jsonify({"inventory": rows, "count": len(rows), "generated_at": generated_at})
 
 
 @app.post("/api/inventory/<int:item_id>/stock")
 @login_required
-@role_required(*PHC_MANAGER_ROLES)
+@role_required(*EDITOR_ROLES)
 def api_update_stock(item_id):
     data = request.get_json(silent=True) or {}
     if "stock_qty" not in data:
@@ -289,7 +579,7 @@ def api_update_stock(item_id):
     if not item:
         conn.close()
         return jsonify({"error": "Inventory line not found"}), 404
-    if current_scope() not in (None, item["phc_id"]):
+    if not _in_scope(conn, item["phc_id"]):
         conn.close()
         return jsonify({"error": "Forbidden"}), 403
 
@@ -322,8 +612,9 @@ def api_update_stock(item_id):
 @login_required
 def api_medicines():
     conn = get_db()
+    clause, params = scope_clause(geo_scope(conn))
     rows = conn.execute(
-        """
+        f"""
         SELECT m.medicine_id, m.name, m.category, m.strength, m.unit, m.essential,
                COUNT(i.id) AS stocked_phcs,
                COALESCE(SUM(i.stock_qty), 0) AS district_stock,
@@ -332,9 +623,12 @@ def api_medicines():
                         THEN i.stock_qty / i.avg_daily_consumption END) AS avg_days
         FROM medicine m
         LEFT JOIN inventory i ON i.medicine_id = m.medicine_id
+        LEFT JOIN phc p ON p.phc_id = i.phc_id
+        WHERE 1=1 {clause} OR i.id IS NULL
         GROUP BY m.medicine_id
         ORDER BY m.category, m.name
-        """
+        """,
+        params,
     ).fetchall()
     conn.close()
     out = []
@@ -347,7 +641,7 @@ def api_medicines():
 
 @app.post("/api/medicines")
 @login_required
-@role_required("admin", "district_officer")
+@role_required("admin", "district_officer", "state_officer")
 def api_add_medicine():
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
@@ -375,35 +669,37 @@ def api_add_medicine():
 def api_alerts():
     conn = get_db()
     status_filter = request.args.get("status", "open")
-    q = """
-        SELECT a.*, p.name AS phc_name, p.block, m.name AS medicine, m.unit
+    clause, params = scope_clause(geo_scope(conn))
+    q = f"""
+        SELECT a.*, p.name AS phc_name, p.block, s.name AS state_name, d.name AS district_name,
+               m.name AS medicine, m.unit
         FROM alerts a
         JOIN phc p ON p.phc_id = a.phc_id
+        JOIN state s ON s.state_id = p.state_id
+        JOIN district d ON d.district_id = p.district_id
         JOIN medicine m ON m.medicine_id = a.medicine_id
-        WHERE 1=1
+        WHERE 1=1 {clause}
     """
-    params = []
+    args = list(params)
     if status_filter in ("open", "acknowledged", "resolved"):
         if status_filter == "open":
             q += " AND a.status IN ('open','acknowledged')"
         else:
             q += " AND a.status = ?"
-            params.append(status_filter)
+            args.append(status_filter)
     else:
         q += " AND a.status IN ('open','acknowledged')"
-    if current_scope():
-        q += " AND a.phc_id = ?"
-        params.append(current_scope())
     q += " ORDER BY CASE a.severity WHEN 'stock_out' THEN 0 WHEN 'critical' THEN 1 ELSE 2 END, a.days_of_stock ASC"
-    rows = [dict(r) for r in conn.execute(q, params)]
-    counts = _alert_counts(conn, current_scope())
+    rows = [dict(r) for r in conn.execute(q, args)]
+    counts = _alert_counts(conn, clause, params)
+    generated_at = conn.execute("SELECT CURRENT_TIMESTAMP AS ts").fetchone()["ts"]
     conn.close()
-    return jsonify({"alerts": rows, "counts": counts})
+    return jsonify({"alerts": rows, "counts": counts, "generated_at": generated_at})
 
 
 @app.post("/api/alerts/<int:alert_id>/action")
 @login_required
-@role_required(*PHC_MANAGER_ROLES)
+@role_required(*EDITOR_ROLES)
 def api_alert_action(alert_id):
     data = request.get_json(silent=True) or {}
     action = data.get("action")
@@ -414,7 +710,7 @@ def api_alert_action(alert_id):
     if not alert:
         conn.close()
         return jsonify({"error": "Alert not found"}), 404
-    if current_scope() not in (None, alert["phc_id"]):
+    if not _in_scope(conn, alert["phc_id"]):
         conn.close()
         return jsonify({"error": "Forbidden"}), 403
 
@@ -436,41 +732,57 @@ def api_alert_action(alert_id):
 def api_redistribution_list():
     conn = get_db()
     status_filter = request.args.get("status")
+    drill = geo_scope(conn)
+    own = session_scope()
     q = """
         SELECT r.*, fp.name AS from_phc_name, tp.name AS to_phc_name,
                m.name AS medicine, m.unit
         FROM redistribution r
         LEFT JOIN phc fp ON fp.phc_id = r.from_phc_id
-        JOIN phc tp ON tp.phc_id = r.to_phc_id
+        LEFT JOIN phc f ON f.phc_id = r.from_phc_id
+        LEFT JOIN phc tp ON tp.phc_id = r.to_phc_id
+        LEFT JOIN phc p ON p.phc_id = r.to_phc_id
         JOIN medicine m ON m.medicine_id = r.medicine_id
         WHERE 1=1
     """
-    params = []
+    args = []
+    if drill:
+        to_sql, to_params = scope_clause(drill, "p")
+        from_sql, from_params = scope_clause(drill, "f")
+        q += f" AND (({to_sql[5:]}) OR ({from_sql[5:]}))"
+        args += list(to_params) + list(from_params)
+    if own.get("phc_id") is not None:
+        q += " AND (r.to_phc_id = ? OR r.from_phc_id = ?)"
+        args += [own["phc_id"], own["phc_id"]]
+    elif own.get("district_id") is not None:
+        q += " AND (tp.district_id = ? OR fp.district_id = ?)"
+        args += [own["district_id"], own["district_id"]]
+    elif own.get("state_id") is not None:
+        q += " AND (tp.state_id = ? OR fp.state_id = ?)"
+        args += [own["state_id"], own["state_id"]]
     if status_filter and status_filter != "all":
         q += " AND r.status = ?"
-        params.append(status_filter)
-    if current_scope():
-        q += " AND (r.to_phc_id = ? OR r.from_phc_id = ?)"
-        params += [current_scope(), current_scope()]
+        args.append(status_filter)
     q += " ORDER BY r.created_at DESC"
-    rows = [dict(r) for r in conn.execute(q, params)]
+    rows = [dict(r) for r in conn.execute(q, args)]
     conn.close()
     return jsonify({"redistributions": rows})
 
 
 @app.get("/api/redistribution/suggestions")
 @login_required
-@role_required("admin", "district_officer")
+@role_required(*OFFICER_ROLES)
 def api_redistribution_suggestions():
     conn = get_db()
-    suggestions = stock.redistribution_suggestions(conn)
+    clause, params = scope_clause(geo_scope(conn))
+    suggestions = stock.redistribution_suggestions(conn, clause, params)
     conn.close()
     return jsonify({"suggestions": suggestions, "target_days": stock.TARGET_DAYS})
 
 
 @app.post("/api/redistribution")
 @login_required
-@role_required("admin", "district_officer")
+@role_required(*OFFICER_ROLES)
 def api_redistribution_create():
     data = request.get_json(silent=True) or {}
     to_phc = data.get("to_phc_id")
@@ -487,6 +799,9 @@ def api_redistribution_create():
         return jsonify({"error": "quantity must be positive"}), 400
 
     conn = get_db()
+    if not _in_scope(conn, to_phc):
+        conn.close()
+        return jsonify({"error": "Forbidden"}), 403
     if from_phc:
         donor = conn.execute(
             "SELECT stock_qty FROM inventory WHERE phc_id = ? AND medicine_id = ?", (from_phc, med_id)
@@ -503,7 +818,7 @@ def api_redistribution_create():
         (from_phc, to_phc, med_id, qty, (data.get("reason") or "").strip(), session.get("username")),
     )
     log_audit(conn, "redistribution_propose",
-              f"Proposed {qty} units of medicine {med_id} -> PHC {to_phc} from {from_phc or 'district pool'}")
+              f"Proposed {qty} units of medicine {med_id} -> PHC {to_phc} from {from_phc or 'central pool'}")
     conn.commit()
     conn.close()
     return jsonify({"status": "ok"})
@@ -511,7 +826,7 @@ def api_redistribution_create():
 
 @app.post("/api/redistribution/<int:transfer_id>/status")
 @login_required
-@role_required(*PHC_MANAGER_ROLES)
+@role_required(*EDITOR_ROLES)
 def api_redistribution_status(transfer_id):
     data = request.get_json(silent=True) or {}
     new_status = data.get("status")
@@ -524,7 +839,7 @@ def api_redistribution_status(transfer_id):
     if not row:
         conn.close()
         return jsonify({"error": "Transfer not found"}), 404
-    if current_scope() not in (None, row["to_phc_id"], row["from_phc_id"]):
+    if not (_in_scope(conn, row["to_phc_id"]) or _in_scope(conn, row["from_phc_id"] or -1)):
         conn.close()
         return jsonify({"error": "Forbidden"}), 403
 
@@ -564,7 +879,7 @@ def api_redistribution_status(transfer_id):
 
 @app.post("/api/upload")
 @login_required
-@role_required("admin", "district_officer")
+@role_required(*OFFICER_ROLES)
 def api_upload():
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
@@ -610,7 +925,7 @@ def api_upload():
 
 @app.post("/api/upload/confirm")
 @login_required
-@role_required("admin", "district_officer")
+@role_required(*OFFICER_ROLES)
 def api_upload_confirm():
     data = request.get_json(silent=True) or {}
     upload_id = data.get("upload_id")
@@ -625,7 +940,7 @@ def api_upload_confirm():
         return jsonify({"error": "Upload session expired. Re-upload the file."}), 400
 
     try:
-        result = uploader.confirm(conn, rec["temp_path"], session.get("username"))
+        result = uploader.confirm(conn, rec["temp_path"], session.get("username"), _in_scope)
     except Exception as e:
         conn.close()
         return jsonify({"error": f"Insert failed: {e}"}), 500
@@ -649,7 +964,7 @@ def api_upload_confirm():
 
 @app.get("/api/upload/history")
 @login_required
-@role_required("admin", "district_officer")
+@role_required(*OFFICER_ROLES)
 def api_upload_history():
     conn = get_db()
     rows = [dict(r) for r in conn.execute(
@@ -663,11 +978,19 @@ def api_upload_history():
 
 @app.get("/api/audit")
 @login_required
-@role_required("admin", "district_officer")
+@role_required("admin", "district_officer", "state_officer")
 def api_audit():
     conn = get_db()
+    own = session_scope()
+    q, params = " WHERE 1=1", []
+    if own.get("state_id"):
+        q += " AND state_id = ?"
+        params.append(own["state_id"])
+    elif own.get("district_id"):
+        q += " AND district_id = ?"
+        params.append(own["district_id"])
     rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM audit_log ORDER BY id DESC LIMIT 100")]
+        f"SELECT * FROM audit_log{q} ORDER BY id DESC LIMIT 100", params)]
     conn.close()
     return jsonify({"audit": rows})
 

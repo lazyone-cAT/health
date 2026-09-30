@@ -457,6 +457,18 @@ h1,h2,h3{font-family: 'Fraunces', serif; letter-spacing: -0.03em; line-height: 1
 /* Empty state */
 .empty{border:1px dashed var(--line); padding:26px 16px; text-align:center; color:var(--muted); font-size:0.82rem; background:#fff}
 
+/* Drill-down breadcrumb (India -> state -> district -> PHC) */
+.crumbs{
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  border:1px solid var(--line); background:var(--bg-card);
+  padding:8px 12px; margin-bottom:14px; font-size:0.78rem;
+}
+.crumbs a{color:var(--accent); font-weight:600; text-decoration:none}
+.crumbs a:hover{text-decoration:underline}
+.crumbs b{color:var(--fg)}
+.crumb-sep{color:var(--muted-2)}
+.crumb-note{color:var(--muted); font-size:0.66rem; letter-spacing:0.08em; text-transform:uppercase; font-weight:700}
+
 /* Toast */
 .toast{position:fixed; right:18px; bottom:18px; background:var(--fg); color:#fff; border:1px solid var(--fg);
   padding:11px 15px; font-size:0.8rem; z-index:300; max-width:340px}

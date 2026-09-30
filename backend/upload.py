@@ -187,20 +187,28 @@ def save_temp(file_storage):
     return upload_id, path, ext.lstrip(".")
 
 
-def confirm(conn, temp_path, username):
-    """Apply previewed rows: upsert inventory, then refresh alerts."""
+def confirm(conn, temp_path, username, in_scope=None):
+    """Apply previewed rows: upsert inventory, then refresh alerts.
+
+    `in_scope(conn, phc_id)` (optional) drops rows whose facility falls outside
+    the uploader's state/district/PHC scope.
+    """
     from stock import refresh_alerts
 
     df = read_file(temp_path)
     detection = detect_columns(df)
     result = preview(conn, df, detection["mappings"])
 
-    inserted = updated = rejected = 0
+    inserted = updated = rejected = out_of_scope = 0
     for row in result["all_rows"]:
         if row["errors"]:
             rejected += 1
             continue
         phc_id = conn.execute("SELECT phc_id FROM phc WHERE name = ?", (row["phc_name"],)).fetchone()[0]
+        if in_scope is not None and not in_scope(conn, phc_id):
+            out_of_scope += 1
+            rejected += 1
+            continue
         med_id = conn.execute("SELECT medicine_id FROM medicine WHERE name = ?", (row["medicine_name"],)).fetchone()[0]
         adc = row["avg_daily_consumption"]
         existing = conn.execute(
@@ -226,4 +234,4 @@ def confirm(conn, temp_path, username):
     refresh_alerts(conn)
     _ = username
     return {"rows_inserted": inserted, "rows_updated": updated, "rows_rejected": rejected,
-            "alerts_refreshed": True}
+            "rows_out_of_scope": out_of_scope, "alerts_refreshed": True}

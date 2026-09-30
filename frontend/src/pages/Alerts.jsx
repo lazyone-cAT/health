@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
+import GeoFilters, { geoQuery } from '../components/GeoFilters'
 import { Empty, PageHeader, Panel, Spinner, StatusChip, Toast } from '../components/ui'
 
 const TABS = [
@@ -17,8 +18,10 @@ export default function Alerts() {
   const [toast, setToast] = useState({ message: '', error: false })
 
   const load = useCallback(() => {
-    api(`/api/alerts?status=${tab}`).then(setData).catch((e) => setToast({ message: e.message, error: true }))
-  }, [tab])
+    const qs = geoQuery(params)
+    qs.set('status', tab)
+    api(`/api/alerts?${qs.toString()}`).then(setData).catch((e) => setToast({ message: e.message, error: true }))
+  }, [tab, params])
 
   useEffect(() => { load() }, [load])
 
@@ -47,13 +50,22 @@ export default function Alerts() {
         <span className="chip chip-low">{counts.low || 0} low</span>
       </PageHeader>
 
+      <div className="filters-row">
+        <GeoFilters params={params} setParams={setParams} />
+      </div>
+
       <div className="section-nav">
         {TABS.map(([v, l]) => (
           <a key={v} href="#" className={tab === v ? 'active' : ''}
             onClick={(e) => { e.preventDefault(); setTab(v) }}>{l}</a>
         ))}
         {severity && (
-          <a href="#" className="active" onClick={(e) => { e.preventDefault(); setParams({}) }}>
+          <a href="#" className="active" onClick={(e) => {
+            e.preventDefault()
+            const next = new URLSearchParams(params)
+            next.delete('severity')
+            setParams(next)
+          }}>
             severity: {severity} ✕
           </a>
         )}
@@ -69,7 +81,7 @@ export default function Alerts() {
               <div>
                 <div className="alert-msg">{a.message}</div>
                 <div className="alert-meta">
-                  {a.phc_name} · {a.block} block · {a.medicine} · status: {a.status}
+                  {a.phc_name} · {a.district_name} · {a.block} block · {a.medicine} · status: {a.status}
                   {a.ack_by ? ` · by ${a.ack_by}` : ''} · raised {a.created_at}
                 </div>
               </div>

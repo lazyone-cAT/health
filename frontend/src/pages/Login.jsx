@@ -3,8 +3,9 @@ import { Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
 
 const DEMO = [
+  { label: 'admin / admin123  —  Admin (all states)', u: 'admin', p: 'admin123' },
+  { label: 'odisha1 / state123  —  State Officer', u: 'odisha1', p: 'state123' },
   { label: 'district1 / district123  —  District Officer', u: 'district1', p: 'district123' },
-  { label: 'admin / admin123  —  Admin', u: 'admin', p: 'admin123' },
   { label: 'khariar1 / phc123  —  PHC In-charge', u: 'khariar1', p: 'phc123' },
 ]
 
@@ -39,14 +40,15 @@ export default function Login() {
           <div className="sidebar-logo" style={{ color: '#fff' }}>
             <span style={{ color: '#5eead4' }}>PHC Stock</span>
           </div>
-          <h1 style={{ marginTop: 28 }}>District medicine inventory, without the spreadsheet.</h1>
+          <h1 style={{ marginTop: 28 }}>National medicine inventory, without the spreadsheet.</h1>
           <p>
-            Live stock positions across every PHC, stock-out days computed by simple
-            division, redistribution suggestions, and an audit trail for every change.
+            Live stock positions across every PHC — state to district to facility —
+            stock-out days computed by simple division, redistribution suggestions,
+            and an audit trail for every change.
           </p>
           <div className="hero-kpis">
-            <div className="hero-kpi"><div className="n">8</div><div className="l">PHCs tracked</div></div>
-            <div className="hero-kpi"><div className="n">20</div><div className="l">Essential medicines</div></div>
+            <div className="hero-kpi"><div className="n">30</div><div className="l">PHCs tracked</div></div>
+            <div className="hero-kpi"><div className="n">3</div><div className="l">States · 9 districts</div></div>
             <div className="hero-kpi"><div className="n">÷</div><div className="l">Stock / daily usage</div></div>
           </div>
         </div>
@@ -59,7 +61,7 @@ export default function Login() {
         <div className="login-card">
           <h2 className="page-title" style={{ marginBottom: 4 }}>Sign in</h2>
           <div className="page-subtitle" style={{ marginBottom: 18 }}>
-            Role-based access — district view, PHC-scoped view, or admin.
+            Role-based access — India, state, district or single-PHC scope.
           </div>
           <form onSubmit={submit}>
             <div className="form-group">

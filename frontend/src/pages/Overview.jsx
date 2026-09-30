@@ -1,37 +1,86 @@
-import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../auth'
 import { Empty, KpiCard, PageHeader, Panel, Spinner, StatusChip } from '../components/ui'
+import { geoQuery } from '../components/GeoFilters'
+
+const LEVEL_TITLE = {
+  country: 'States',
+  state: 'Districts',
+  district: 'Primary Health Centres',
+  phc: 'Facility',
+}
 
 export default function Overview() {
   const { user } = useAuth()
   const navigate = useNavigate()
+  const [params, setParams] = useSearchParams()
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
 
-  useEffect(() => {
-    api('/api/overview').then(setData).catch((e) => setError(e.message))
-  }, [])
+  const load = useCallback(() => {
+    const qs = geoQuery(params)
+    api(`/api/overview?${qs.toString()}`).then(setData).catch((e) => setError(e.message))
+  }, [params])
+
+  useEffect(() => { load() }, [load])
 
   if (error) return <Empty>{error}</Empty>
   if (!data) return <Spinner />
 
   const s = data.stats
   const scoped = user.role === 'phc_manager'
+  const scopeLabel = data.level === 'country'
+    ? 'India'
+    : data.level === 'state'
+      ? data.geo_names.state
+      : data.level === 'district'
+        ? data.geo_names.district
+        : data.geo_names.phc
+
+  const drillParams = (child) => {
+    if (data.level === 'country') return { state_id: child.id }
+    if (data.level === 'state') return { state_id: data.geo.state_id, district_id: child.id }
+    if (data.level === 'district') return { phc_id: child.id }
+    return { phc_id: data.geo.phc_id }
+  }
+
+  const openChild = (child) => {
+    if (data.level === 'phc') navigate(`/inventory?phc_id=${data.geo.phc_id}`)
+    else setParams(drillParams(child))
+  }
+
+  const crumbs = data.breadcrumb || [{ level: 'country', label: 'India', params: {} }]
 
   return (
     <>
       <PageHeader
-        title={scoped ? `${user.phc_name} — Stock Overview` : 'District Overview'}
-        subtitle={`Days of cover = stock ÷ average daily consumption. Below 7 days is critical, below 14 days is low.`}
+        title={`${scopeLabel} — Stock Overview`}
+        subtitle="Days of cover = stock ÷ average daily consumption. Below 7 days is critical, below 14 days is low."
       >
         <Link className="btn" to="/alerts">Open alerts</Link>
         {!scoped && <Link className="btn btn-primary" to="/redistribution">Redistribution</Link>}
       </PageHeader>
 
+      <nav className="crumbs" aria-label="Drill-down path">
+        {crumbs.map((c, i) => (
+          <span key={`${c.level}-${i}`}>
+            {i > 0 && <span className="crumb-sep">›</span>}
+            {i < crumbs.length - 1 ? (
+              <a href="#" onClick={(e) => { e.preventDefault(); setParams(c.params) }}>{c.label}</a>
+            ) : (
+              <b>{c.label}</b>
+            )}
+          </span>
+        ))}
+        <span className="crumb-sep">·</span>
+        <span className="crumb-note">level: {data.level}</span>
+      </nav>
+
       <div className="kpi-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
-        <KpiCard label="PHCs reporting" value={s.phcs} detail={scoped ? 'Single facility view' : 'All facilities in district'} />
+        <KpiCard label="PHCs reporting" value={s.phcs}
+          detail={scoped ? 'Single facility view' : `${s.districts} district${s.districts === 1 ? '' : 's'} in scope`} />
         <KpiCard label="Stock-out lines" value={s.stock_out} tone={s.stock_out ? 'red' : 'green'} detail="Stock quantity is zero" />
         <KpiCard label="Critical (<7 days)" value={s.critical} tone={s.critical ? 'yellow' : 'green'} detail="Will run out this week" />
         <KpiCard label="Open alerts" value={s.open_alerts} tone={s.open_alerts ? 'red' : 'green'} detail={`${s.lines} inventory lines tracked`} />
@@ -39,26 +88,54 @@ export default function Overview() {
 
       <div className="kpi-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
         <KpiCard label="Low (7–14 days)" value={s.low} tone={s.low ? 'yellow' : 'green'} detail="Reorder window" />
-        <KpiCard label="Avg days of cover" value={s.avg_days_cover} detail="District average across all lines" />
-        <KpiCard label="Medicines" value={s.medicines} detail="Essential list items" />
-        <KpiCard label="District" value="Kalahandi" detail="Block-level PHC network" />
+        <KpiCard label="Avg days of cover" value={s.avg_days_cover} detail="Average across visible lines" />
+        <KpiCard label={s.states === 1 ? 'Districts' : 'States'}
+          value={s.states === 1 ? s.districts : s.states}
+          detail={s.states === 1 ? 'Districts in this state' : 'States in the network'} />
+        <KpiCard label={data.level === 'country' ? 'Network' : 'Scope'} value={scopeLabel}
+          detail={data.level === 'country' ? `${s.phcs} PHCs · ${s.medicines} medicines` : 'Current drill-down level'} />
       </div>
 
-      {!scoped && (
-        <Panel title="PHC rollup" icon="inventory" right={<span style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>click a facility to open its inventory</span>}>
+      {!scoped && data.level !== 'phc' && data.children.length > 0 && (
+        <Panel title={LEVEL_TITLE[data.level]} icon="inventory"
+          right={<span style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>
+            {data.level === 'phc' ? 'open full inventory' : 'click to drill down'}
+          </span>}>
           <div className="phc-grid">
-            {data.phcs.map((p) => (
-              <div key={p.phc_id} className="phc-card" style={{ cursor: 'pointer' }}
-                onClick={() => navigate(`/inventory?phc_id=${p.phc_id}`)}>
+            {data.children.map((c) => (
+              <div key={c.id} className="phc-card" style={{ cursor: 'pointer' }}
+                onClick={() => openChild(c)}>
                 <div className="phc-card-head">
-                  <div className="phc-name">{p.name}</div>
-                  <div className="phc-block">{p.block}</div>
+                  <div className="phc-name">{c.name}</div>
+                  <div className="phc-block">{c.code || c.block || ''}</div>
                 </div>
                 <div className="phc-stats">
-                  <span><b>{p.lines}</b> lines</span>
-                  <span><b className={p.stock_out ? 'danger' : ''}>{p.stock_out}</b> out</span>
-                  <span><b>{p.critical}</b> crit</span>
-                  <span><b>{p.avg_days != null ? p.avg_days.toFixed(0) : '—'}d</b> cover</span>
+                  <span><b>{c.phcs}</b> {data.level === 'district' ? 'site' : 'PHCs'}</span>
+                  <span><b className={c.stock_out ? 'danger' : ''}>{c.stock_out}</b> out</span>
+                  <span><b>{c.critical}</b> crit</span>
+                  <span><b>{c.avg_days != null ? c.avg_days.toFixed(0) : '—'}d</b> cover</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
+      {data.level === 'phc' && (
+        <Panel title="Facility" icon="inventory"
+          right={<Link className="btn" to={`/inventory?phc_id=${data.geo.phc_id}`}>Open inventory</Link>}>
+          <div className="phc-grid">
+            {data.children.map((c) => (
+              <div key={c.id} className="phc-card">
+                <div className="phc-card-head">
+                  <div className="phc-name">{c.name}</div>
+                  <div className="phc-block">{c.block}</div>
+                </div>
+                <div className="phc-stats">
+                  <span><b>{c.lines}</b> lines</span>
+                  <span><b className={c.stock_out ? 'danger' : ''}>{c.stock_out}</b> out</span>
+                  <span><b>{c.critical}</b> crit</span>
+                  <span><b>{c.beds}</b> beds</span>
                 </div>
               </div>
             ))}
@@ -88,9 +165,14 @@ export default function Overview() {
         <Panel title="Alerts by severity" icon="overview">
           <div className="severity-strip" style={{ marginBottom: 0 }}>
             {['stock_out', 'critical', 'low'].map((sev) => (
-              <div key={sev} className="severity-card" onClick={() => navigate(`/alerts?severity=${sev}`)}>
+              <div key={sev} className="severity-card"
+                onClick={() => {
+                  const next = new URLSearchParams(geoQuery(params))
+                  next.set('severity', sev)
+                  navigate(`/alerts?${next.toString()}`)
+                }}>
                 <div className="kpi-label">{sev === 'stock_out' ? 'Stock-out' : sev}</div>
-                <div className={`severity-num ${sev}`}>{data.alerts_by_severity[sev]}</div>
+                <div className={`severity-num ${sev}`}>{data.alerts_by_severity[sev] || 0}</div>
                 <div className="kpi-detail">open alerts</div>
               </div>
             ))}
