@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from flask import Flask, abort, jsonify, request, send_from_directory, session
 
 import db as database
+import forecast
 import stock
 import upload as uploader
 from auth import OFFICER_ROLES, hash_password, log_audit, login_required, role_required
@@ -341,10 +342,16 @@ def api_overview():
         JOIN medicine m ON m.medicine_id = a.medicine_id
         WHERE a.status IN ('open','acknowledged') {clause}
     """
-    order = "CASE a.severity WHEN 'stock_out' THEN 0 WHEN 'critical' THEN 1 ELSE 2 END, a.days_of_stock ASC"
+    order = ("CASE a.severity WHEN 'stock_out' THEN 0 WHEN 'critical' THEN 1"
+             " WHEN 'forecast_risk' THEN 2 ELSE 3 END, a.days_of_stock ASC")
     alerts = [dict(r) for r in conn.execute(q + f" ORDER BY {order} LIMIT 8", params)]
 
     by_severity = _alert_counts(conn, clause, params)
+    settings = forecast.get_settings(conn)
+    top_risks = [
+        {k: r[k] for k in ("phc_name", "medicine", "days_to_stockout", "stockout_date", "r2", "stock_qty")}
+        for r in forecast.compute_forecasts(conn, clause, params, limit=8)
+    ]
     generated_at = conn.execute("SELECT CURRENT_TIMESTAMP AS ts").fetchone()["ts"]
     conn.close()
 
@@ -358,6 +365,11 @@ def api_overview():
             "children": children,
             "top_alerts": alerts,
             "alerts_by_severity": by_severity,
+            "forecast": {
+                "top_risks": top_risks,
+                "models": forecast.models_trained(),
+                "settings": settings,
+            },
             "generated_at": generated_at,
         }
     )
@@ -443,7 +455,7 @@ def _breadcrumb(conn, filters):
 def _alert_counts(conn, clause, params):
     q = f"SELECT severity, COUNT(*) AS n FROM alerts a JOIN phc p ON p.phc_id = a.phc_id" \
         f" WHERE a.status IN ('open','acknowledged') {clause} GROUP BY severity"
-    out = {"stock_out": 0, "critical": 0, "low": 0}
+    out = {"stock_out": 0, "critical": 0, "low": 0, "forecast_risk": 0}
     for r in conn.execute(q, params):
         out[r["severity"]] = r["n"]
     return out
@@ -865,6 +877,7 @@ def api_update_stock(item_id):
     status, days = stock.evaluate_row(
         new_stock, new_adc if new_adc is not None else item["avg_daily_consumption"]
     )
+    forecast.invalidate(item["phc_id"], item["medicine_id"])
     stock.refresh_alerts(conn)
     log_audit(
         conn, "stock_update",
@@ -958,7 +971,8 @@ def api_alerts():
             args.append(status_filter)
     else:
         q += " AND a.status IN ('open','acknowledged')"
-    q += " ORDER BY CASE a.severity WHEN 'stock_out' THEN 0 WHEN 'critical' THEN 1 ELSE 2 END, a.days_of_stock ASC"
+    q += (" ORDER BY CASE a.severity WHEN 'stock_out' THEN 0 WHEN 'critical' THEN 1"
+          " WHEN 'forecast_risk' THEN 2 ELSE 3 END, a.days_of_stock ASC")
     rows = [dict(r) for r in conn.execute(q, args)]
     counts = _alert_counts(conn, clause, params)
     generated_at = conn.execute("SELECT CURRENT_TIMESTAMP AS ts").fetchone()["ts"]
@@ -992,6 +1006,96 @@ def api_alert_action(alert_id):
     conn.commit()
     conn.close()
     return jsonify({"status": "ok", "new_status": new_status})
+
+
+# ============================== Forecast ==============================
+
+@app.get("/api/forecast")
+@login_required
+def api_forecast():
+    """Projected stock-out per visible inventory line (Ridge, 14-day horizon)."""
+    conn = get_db()
+    clause, params = scope_clause(geo_scope(conn))
+    limit = request.args.get("limit", type=int) or 60
+    rows = forecast.compute_forecasts(conn, clause, params, limit=limit)
+    status = forecast.models_trained()
+    settings = forecast.get_settings(conn)
+    generated_at = conn.execute("SELECT CURRENT_TIMESTAMP AS ts").fetchone()["ts"]
+    conn.close()
+    return jsonify({"forecast": rows, "models": status, "settings": settings,
+                    "horizon": forecast.HORIZON, "risk_days": forecast.RISK_DAYS,
+                    "generated_at": generated_at})
+
+
+@app.get("/api/forecast/status")
+@login_required
+def api_forecast_status():
+    conn = get_db()
+    history_rows = conn.execute("SELECT COUNT(*) AS n FROM consumption_history").fetchone()["n"]
+    generated_at = conn.execute("SELECT CURRENT_TIMESTAMP AS ts").fetchone()["ts"]
+    conn.close()
+    return jsonify({
+        "horizon": forecast.HORIZON,
+        "risk_days": forecast.RISK_DAYS,
+        "holdout_days": forecast.HOLDOUT,
+        "history_rows": history_rows,
+        "generated_at": generated_at,
+        **forecast.models_trained(),
+    })
+
+
+# ============================== Settings ==============================
+
+@app.get("/api/settings")
+@login_required
+def api_settings():
+    conn = get_db()
+    settings = forecast.get_settings(conn)
+    conn.close()
+    return jsonify(settings)
+
+
+@app.post("/api/settings")
+@login_required
+@role_required(*OFFICER_ROLES)
+def api_update_settings():
+    data = request.get_json(silent=True) or {}
+    conn = get_db()
+    applied = {}
+    if "emergency_mode" in data:
+        mode = 1 if data.get("emergency_mode") else 0
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES ('emergency_mode', ?, CURRENT_TIMESTAMP)"
+            " ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+            (str(mode),),
+        )
+        applied["emergency_mode"] = bool(mode)
+    if "emergency_multiplier" in data:
+        try:
+            mult = float(data.get("emergency_multiplier"))
+        except (TypeError, ValueError):
+            conn.close()
+            return jsonify({"error": "emergency_multiplier must be a number"}), 400
+        if not 1.0 <= mult <= 5.0:
+            conn.close()
+            return jsonify({"error": "emergency_multiplier must be between 1.0 and 5.0"}), 400
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES ('emergency_multiplier', ?, CURRENT_TIMESTAMP)"
+            " ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+            (str(mult),),
+        )
+        applied["emergency_multiplier"] = mult
+    if not applied:
+        conn.close()
+        return jsonify({"error": "emergency_mode or emergency_multiplier required"}), 400
+
+    log_audit(conn, "settings_update", f"Settings updated: {applied}")
+    forecast.invalidate()  # multiplier feeds every projection
+    stock.refresh_alerts(conn)  # re-evaluates forecast_risk alerts
+    settings = forecast.get_settings(conn)
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "settings": settings})
 
 
 # ============================== Redistribution ==============================
@@ -1209,6 +1313,7 @@ def api_upload_confirm():
         return jsonify({"error": "Upload session expired. Re-upload the file."}), 400
 
     try:
+        forecast.invalidate()  # bulk stock change -> drop every cached projection
         result = uploader.confirm(conn, rec["temp_path"], session.get("username"), _in_scope)
     except Exception as e:
         conn.close()

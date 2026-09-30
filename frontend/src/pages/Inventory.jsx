@@ -19,6 +19,7 @@ export default function Inventory() {
   const { user } = useAuth()
   const [params, setParams] = useSearchParams()
   const [rows, setRows] = useState(null)
+  const [proj, setProj] = useState({})
   const [q, setQ] = useState(params.get('q') || '')
   const [status, setStatus] = useState('all')
   const [editing, setEditing] = useState(null)
@@ -30,8 +31,16 @@ export default function Inventory() {
     const qs = geoQuery(params)
     if (q) qs.set('q', q)
     if (status !== 'all') qs.set('status', status)
-    api(`/api/inventory?${qs.toString()}`)
-      .then((d) => setRows(d.inventory))
+    Promise.all([
+      api(`/api/inventory?${qs.toString()}`),
+      api(`/api/forecast?${qs.toString()}&limit=1000`).catch(() => null),
+    ])
+      .then(([inv, fc]) => {
+        setRows(inv.inventory)
+        const map = {}
+        for (const r of fc?.forecast || []) map[`${r.phc_id}:${r.medicine_id}`] = r
+        setProj(map)
+      })
       .catch((e) => setToast({ message: e.message, error: true }))
   }, [q, status, params])
 
@@ -61,9 +70,10 @@ export default function Inventory() {
 
   const exportCsv = () => {
     if (!rows) return
-    const head = ['phc', 'medicine', 'category', 'stock', 'avg_daily_consumption', 'days_of_stock', 'status']
+    const head = ['phc', 'medicine', 'category', 'stock', 'avg_daily_consumption', 'days_of_stock', 'status', 'forecast_stockout']
     const body = rows.map((r) => [r.phc_name, r.medicine, r.category, r.stock_qty,
-      r.avg_daily_consumption, r.days_of_stock ?? '', r.status]
+      r.avg_daily_consumption, r.days_of_stock ?? '', r.status,
+      proj[`${r.phc_id}:${r.medicine_id}`]?.stockout_date || '']
       .map((v) => `"${String(v).replaceAll('"', '""')}"`).join(','))
     const blob = new Blob([[head.join(','), ...body].join('\n')], { type: 'text/csv' })
     const a = document.createElement('a')
@@ -101,11 +111,13 @@ export default function Inventory() {
               <tr>
                 <th>PHC</th><th>Medicine</th><th>Category</th>
                 <th>Stock</th><th>Daily use</th><th>Days of cover</th>
-                <th>Status</th><th>Surplus</th><th>Updated</th><th></th>
+                <th>Status</th><th>Stock-out (forecast)</th><th>Surplus</th><th>Updated</th><th></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
+              {rows.map((r) => {
+                const f = proj[`${r.phc_id}:${r.medicine_id}`]
+                return (
                 <tr key={r.id} className={r.status === 'stock_out' ? 'conflict-row' : ''}>
                   <td>{r.phc_name}<div style={{ fontSize: '0.66rem', color: 'var(--muted)' }}>{r.district_name} · {r.block} block</div></td>
                   <td style={{ fontWeight: 600 }}>{r.medicine}</td>
@@ -114,11 +126,16 @@ export default function Inventory() {
                   <td className="mono">{r.avg_daily_consumption}</td>
                   <td><CoverageBar days={r.days_of_stock} /></td>
                   <td><StatusChip status={r.status} days={r.days_of_stock} /></td>
+                  <td className="mono" style={{ fontSize: '0.72rem', color: f ? '#4338ca' : 'var(--muted)' }}>
+                    {f ? (f.stockout_date || '—') : '—'}
+                    {f?.days_to_stockout != null && <span style={{ color: 'var(--muted)' }}> · {f.days_to_stockout}d</span>}
+                  </td>
                   <td className="mono">{r.surplus > 0 ? r.surplus : '—'}</td>
                   <td style={{ color: 'var(--muted)' }}>{(r.updated_at || '').slice(0, 10)}</td>
                   <td>{canEdit && <button className="btn" onClick={() => openEdit(r)}>Update</button>}</td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>

@@ -142,7 +142,28 @@ CREATE TABLE IF NOT EXISTS staff_attendance (
     on_leave INTEGER NOT NULL DEFAULT 0,
     UNIQUE (phc_id, staff_role, duty_date)
 );
+
+CREATE TABLE IF NOT EXISTS consumption_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phc_id INTEGER NOT NULL REFERENCES phc(phc_id),
+    medicine_id INTEGER NOT NULL REFERENCES medicine(medicine_id),
+    use_date TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    UNIQUE (phc_id, medicine_id, use_date)
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
+
+HISTORY_DAYS = 90
+DEFAULT_SETTINGS = {
+    "emergency_mode": "0",
+    "emergency_multiplier": "1.5",
+}
 
 BED_TYPES = ["General Ward", "Maternity", "Oxygen-supported", "Isolation"]
 BED_SHARE = [0.5, 0.2, 0.2, 0.1]
@@ -256,7 +277,7 @@ def _schema_is_current(conn):
     """Old schema files are rebuilt, not migrated — the DB is ephemeral on
     Render and re-seeds on every deploy anyway."""
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    required_tables = {"state", "district", "bed_capacity", "staff_attendance"}
+    required_tables = {"state", "district", "bed_capacity", "staff_attendance", "consumption_history", "settings"}
     if not required_tables.issubset(tables):
         return False
     phc_cols = {r[1] for r in conn.execute("PRAGMA table_info(phc)")}
@@ -386,6 +407,39 @@ def seed_attendance(conn):
                 )
 
 
+def seed_history(conn):
+    """90 days of deterministic daily consumption per (PHC, medicine). Idempotent."""
+    if conn.execute("SELECT COUNT(*) FROM consumption_history").fetchone()[0]:
+        return
+    from datetime import date, timedelta
+
+    rng = random.Random(45)
+    weekday_factor = [1.1, 1.0, 1.0, 0.97, 1.03, 1.15, 0.85]  # Mon..Sun
+    days = [date.today() - timedelta(days=i) for i in range(HISTORY_DAYS - 1, -1, -1)]
+    rows = conn.execute(
+        "SELECT phc_id, medicine_id, avg_daily_consumption FROM inventory ORDER BY phc_id, medicine_id"
+    ).fetchall()
+    payload = []
+    for row in rows:
+        adc = float(row["avg_daily_consumption"] or 0)
+        for i, d in enumerate(days):
+            trend = 1.0 + 0.15 * (i / max(1, HISTORY_DAYS - 1))
+            qty = adc * weekday_factor[d.weekday()] * trend * rng.uniform(0.93, 1.07)
+            payload.append((row["phc_id"], row["medicine_id"], d.isoformat(), round(max(0.0, qty), 1)))
+    conn.executemany(
+        "INSERT INTO consumption_history (phc_id, medicine_id, use_date, quantity) VALUES (?,?,?,?)",
+        payload,
+    )
+
+
+def seed_settings(conn):
+    """Default settings (emergency demand multiplier). Idempotent."""
+    for key, value in DEFAULT_SETTINGS.items():
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)", (key, value)
+        )
+
+
 def bootstrap():
     if os.path.exists(DB_PATH):
         probe = sqlite3.connect(DB_PATH)
@@ -405,6 +459,8 @@ def bootstrap():
     _seed_if_empty(conn)
     seed_beds(conn)
     seed_attendance(conn)
+    seed_history(conn)
+    seed_settings(conn)
     conn.commit()
     conn.close()
     from stock import refresh_alerts

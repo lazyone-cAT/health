@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
-import { useAuth } from '../auth'
+import { useAuth, isOfficer } from '../auth'
 import { Empty, KpiCard, PageHeader, Panel, Spinner, StatusChip } from '../components/ui'
 import { geoQuery } from '../components/GeoFilters'
 
@@ -18,6 +18,7 @@ export default function Overview() {
   const [params, setParams] = useSearchParams()
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
 
   const load = useCallback(() => {
     const qs = geoQuery(params)
@@ -58,6 +59,21 @@ export default function Overview() {
   }
 
   const crumbs = data.breadcrumb || [{ level: 'country', label: 'India', params: {} }]
+  const fc = data.forecast || { top_risks: [], models: {}, settings: {} }
+  const emergency = Boolean(fc.settings?.emergency_mode)
+  const SEV_LABEL = { stock_out: 'Stock-out', critical: 'Critical', forecast_risk: 'Forecast risk', low: 'Low' }
+
+  const toggleEmergency = async () => {
+    setBusy(true)
+    try {
+      await api('/api/settings', { method: 'POST', body: { emergency_mode: !emergency } })
+      load()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <>
@@ -172,14 +188,14 @@ export default function Overview() {
 
         <Panel title="Alerts by severity" icon="overview">
           <div className="severity-strip" style={{ marginBottom: 0 }}>
-            {['stock_out', 'critical', 'low'].map((sev) => (
+            {['stock_out', 'critical', 'forecast_risk', 'low'].map((sev) => (
               <div key={sev} className="severity-card"
                 onClick={() => {
                   const next = new URLSearchParams(geoQuery(params))
                   next.set('severity', sev)
                   navigate(`/alerts?${next.toString()}`)
                 }}>
-                <div className="kpi-label">{sev === 'stock_out' ? 'Stock-out' : sev}</div>
+                <div className="kpi-label">{SEV_LABEL[sev]}</div>
                 <div className={`severity-num ${sev}`}>{data.alerts_by_severity[sev] || 0}</div>
                 <div className="kpi-detail">open alerts</div>
               </div>
@@ -191,6 +207,53 @@ export default function Overview() {
           </div>
         </Panel>
       </div>
+
+      <Panel title="Demand forecast" icon="federated"
+        right={<span style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>
+          Ridge · {fc.models?.trained || 0} models · 14-day horizon · avg R² {fc.models?.avg_r2 ?? '—'}
+        </span>}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+          {isOfficer(user) && (
+            <button className={`btn ${emergency ? 'btn-primary' : ''}`} disabled={busy}
+              onClick={toggleEmergency}>
+              Emergency demand {emergency ? 'ON' : 'OFF'}
+            </button>
+          )}
+          <span style={{ fontSize: '0.74rem', color: 'var(--muted)' }}>
+            {emergency
+              ? `Forecast demand multiplied by ×${fc.settings?.emergency_multiplier ?? 1.5} — projected stock-out dates move earlier.`
+              : 'Emergency mode multiplies forecast demand (default ×1.5) to stress-test stock-out dates.'}
+          </span>
+        </div>
+        {fc.top_risks.length === 0 ? (
+          <Empty>No line is projected to run out inside the 14-day forecast window.</Empty>
+        ) : (
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr><th>PHC</th><th>Medicine</th><th>Stock</th><th>Projected stock-out</th><th>Days</th><th>R²</th></tr>
+              </thead>
+              <tbody>
+                {fc.top_risks.map((r, i) => (
+                  <tr key={`${r.phc_name}-${r.medicine}-${i}`}>
+                    <td>{r.phc_name}</td>
+                    <td style={{ fontWeight: 600 }}>{r.medicine}</td>
+                    <td className="mono">{r.stock_qty}</td>
+                    <td className="mono">{r.stockout_date || '—'}</td>
+                    <td><StatusChip status="forecast_risk" days={r.days_to_stockout} /></td>
+                    <td className="mono">{r.r2 ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div style={{ marginTop: 10, fontSize: '0.76rem', color: 'var(--muted)' }}>
+          One Ridge model per PHC × medicine, trained on 90 days of consumption history
+          (day-of-week, trend, 7/30-day lags; last 14 days held out for R²).
+          Lines at risk inside 10 days also raise a <span className="mono">forecast_risk</span> alert.
+        </div>
+      </Panel>
     </>
   )
 }

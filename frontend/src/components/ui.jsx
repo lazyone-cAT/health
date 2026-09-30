@@ -46,6 +46,7 @@ export function Panel({ title, icon, children, right }) {
 const STATUS_LABEL = {
   stock_out: 'Stock-out',
   critical: 'Critical',
+  forecast_risk: 'Forecast risk',
   low: 'Low',
   ok: 'OK',
 }

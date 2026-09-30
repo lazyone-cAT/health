@@ -7,7 +7,7 @@ LOW_DAYS = 14
 SURPLUS_DAYS = 21
 TARGET_DAYS = 14
 
-SEVERITY_ORDER = {"stock_out": 0, "critical": 1, "low": 2}
+SEVERITY_ORDER = {"stock_out": 0, "critical": 1, "forecast_risk": 2, "low": 3}
 
 
 def days_of_stock(stock_qty, avg_daily_consumption):
@@ -62,10 +62,11 @@ def refresh_alerts(conn):
             continue
         seen.append((r["phc_id"], r["medicine_id"], status))
         # Severity changed -> close the stale alert type first.
+        # forecast_risk alerts are owned by forecast.py, never touched here.
         conn.execute(
             """
             UPDATE alerts SET status = 'resolved', updated_at = CURRENT_TIMESTAMP
-            WHERE phc_id = ? AND medicine_id = ? AND alert_type != ?
+            WHERE phc_id = ? AND medicine_id = ? AND alert_type NOT IN (?, 'forecast_risk')
               AND status IN ('open', 'acknowledged')
             """,
             (r["phc_id"], r["medicine_id"], status),
@@ -77,6 +78,7 @@ def refresh_alerts(conn):
             ON CONFLICT (phc_id, medicine_id, alert_type) DO UPDATE SET
                 days_of_stock = excluded.days_of_stock,
                 message = excluded.message,
+                status = CASE WHEN alerts.status = 'resolved' THEN 'open' ELSE alerts.status END,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (
@@ -96,7 +98,8 @@ def refresh_alerts(conn):
             conn.execute(
                 """
                 UPDATE alerts SET status = 'resolved', updated_at = CURRENT_TIMESTAMP
-                WHERE phc_id = ? AND medicine_id = ? AND status IN ('open', 'acknowledged')
+                WHERE phc_id = ? AND medicine_id = ? AND alert_type != 'forecast_risk'
+                  AND status IN ('open', 'acknowledged')
                 """,
                 (r["phc_id"], r["medicine_id"]),
             )
@@ -110,6 +113,11 @@ def refresh_alerts(conn):
         )
         """
     )
+
+    # Ridge forecast_risk alerts (trained lazily, cached per line).
+    from forecast import refresh_forecast_alerts
+
+    refresh_forecast_alerts(conn)
     return len(seen)
 
 

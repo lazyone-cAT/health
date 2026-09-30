@@ -47,6 +47,7 @@ export default function Alerts() {
       >
         <span className="chip chip-stock_out">{counts.stock_out || 0} stock-out</span>
         <span className="chip chip-critical">{counts.critical || 0} critical</span>
+        <span className="chip chip-forecast_risk">{counts.forecast_risk || 0} forecast risk</span>
         <span className="chip chip-low">{counts.low || 0} low</span>
       </PageHeader>
 
@@ -103,6 +104,7 @@ export default function Alerts() {
           <span className="mono">stock_out</span> = stock ≤ 0 ·{' '}
           <span className="mono">critical</span> = days_of_stock &lt; 7 ·{' '}
           <span className="mono">low</span> = 7 ≤ days_of_stock &lt; 14 ·{' '}
+          <span className="mono">forecast_risk</span> = Ridge model projects a stock-out within 10 days ·{' '}
           <span className="mono">ok</span> = ≥ 14 days. PHC in-charges see only their own facility's alerts.
         </div>
       </Panel>
