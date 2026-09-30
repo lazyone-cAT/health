@@ -39,6 +39,12 @@ export default function Overview() {
         ? data.geo_names.district
         : data.geo_names.phc
 
+  const hierarchy = s.states > 1
+    ? `${s.states} states · ${s.districts} districts in scope`
+    : s.districts > 1
+      ? `${s.districts} districts in ${data.geo_names.state}`
+      : 'Single facility view'
+
   const drillParams = (child) => {
     if (data.level === 'country') return { state_id: child.id }
     if (data.level === 'state') return { state_id: data.geo.state_id, district_id: child.id }
@@ -60,6 +66,7 @@ export default function Overview() {
         subtitle="Days of cover = stock ÷ average daily consumption. Below 7 days is critical, below 14 days is low."
       >
         <Link className="btn" to="/alerts">Open alerts</Link>
+        <Link className="btn" to="/beds">Beds &amp; Staff</Link>
         {!scoped && <Link className="btn btn-primary" to="/redistribution">Redistribution</Link>}
       </PageHeader>
 
@@ -79,21 +86,22 @@ export default function Overview() {
       </nav>
 
       <div className="kpi-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
-        <KpiCard label="PHCs reporting" value={s.phcs}
-          detail={scoped ? 'Single facility view' : `${s.districts} district${s.districts === 1 ? '' : 's'} in scope`} />
+        <KpiCard label="PHCs reporting" value={s.phcs} detail={hierarchy} />
         <KpiCard label="Stock-out lines" value={s.stock_out} tone={s.stock_out ? 'red' : 'green'} detail="Stock quantity is zero" />
         <KpiCard label="Critical (<7 days)" value={s.critical} tone={s.critical ? 'yellow' : 'green'} detail="Will run out this week" />
-        <KpiCard label="Open alerts" value={s.open_alerts} tone={s.open_alerts ? 'red' : 'green'} detail={`${s.lines} inventory lines tracked`} />
+        <KpiCard label="Open alerts" value={s.open_alerts} tone={s.open_alerts ? 'red' : 'green'}
+          detail={`${s.lines} lines · ${s.medicines} medicines`} />
       </div>
 
       <div className="kpi-grid" style={{ gridTemplateColumns: 'repeat(4,1fr)' }}>
         <KpiCard label="Low (7–14 days)" value={s.low} tone={s.low ? 'yellow' : 'green'} detail="Reorder window" />
         <KpiCard label="Avg days of cover" value={s.avg_days_cover} detail="Average across visible lines" />
-        <KpiCard label={s.states === 1 ? 'Districts' : 'States'}
-          value={s.states === 1 ? s.districts : s.states}
-          detail={s.states === 1 ? 'Districts in this state' : 'States in the network'} />
-        <KpiCard label={data.level === 'country' ? 'Network' : 'Scope'} value={scopeLabel}
-          detail={data.level === 'country' ? `${s.phcs} PHCs · ${s.medicines} medicines` : 'Current drill-down level'} />
+        <KpiCard label="Beds occupied" value={s.beds_occupancy_pct ? `${s.beds_occupancy_pct}%` : '—'}
+          tone={s.beds_occupancy_pct >= 90 ? 'red' : s.beds_occupancy_pct >= 75 ? 'yellow' : 'green'}
+          detail={`${s.beds_occupied} of ${s.beds_total} beds · ${s.beds_available} free`} />
+        <KpiCard label="Staff present today" value={s.staff_present_pct ? `${s.staff_present_pct}%` : '—'}
+          tone={s.staff_present_pct >= 90 ? 'green' : 'yellow'}
+          detail={`${s.staff_present} of ${s.staff_total} posts · ${s.staff_on_leave} on leave`} />
       </div>
 
       {!scoped && data.level !== 'phc' && data.children.length > 0 && (

@@ -9,6 +9,7 @@ Query params (state_id, district_id, phc_id) drill down further but can never
 widen a caller's scope — anything outside it is a 403.
 """
 import os
+from datetime import date, timedelta
 
 from flask import Flask, abort, jsonify, request, send_from_directory, session
 
@@ -328,6 +329,7 @@ def api_overview():
     level = scope_level(filters)
 
     stats = stock.summary_stats(conn, clause, params)
+    stats.update(_capacity_stats(conn, clause, params))
     children = _rollup(conn, level, clause, params)
     crumbs, geo_names = _breadcrumb(conn, filters)
 
@@ -445,6 +447,273 @@ def _alert_counts(conn, clause, params):
     for r in conn.execute(q, params):
         out[r["severity"]] = r["n"]
     return out
+
+
+def _pct(part, whole):
+    return round(100.0 * part / whole, 1) if whole else 0.0
+
+
+def _capacity_stats(conn, clause, params):
+    """Bed + staffing KPIs for the current scope (aggregate rows only)."""
+    today = date.today().isoformat()
+    beds = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(b.total), 0) AS total, COALESCE(SUM(b.occupied), 0) AS occupied
+        FROM bed_capacity b
+        JOIN phc p ON p.phc_id = b.phc_id
+        WHERE 1=1 {clause}
+        """,
+        params,
+    ).fetchone()
+    staff = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(s.staff), 0) AS staff, COALESCE(SUM(s.present), 0) AS present,
+               COALESCE(SUM(s.on_leave), 0) AS on_leave
+        FROM staff_attendance s
+        JOIN phc p ON p.phc_id = s.phc_id
+        WHERE s.duty_date = ? {clause}
+        """,
+        (today, *params),
+    ).fetchone()
+    return {
+        "beds_total": beds["total"],
+        "beds_occupied": beds["occupied"],
+        "beds_available": beds["total"] - beds["occupied"],
+        "beds_occupancy_pct": _pct(beds["occupied"], beds["total"]),
+        "staff_total": staff["staff"],
+        "staff_present": staff["present"],
+        "staff_on_leave": staff["on_leave"],
+        "staff_present_pct": _pct(staff["present"], staff["staff"]),
+    }
+
+
+# ============================== Beds & Staff ==============================
+
+@app.get("/api/beds")
+@login_required
+def api_beds():
+    conn = get_db()
+    clause, params = scope_clause(geo_scope(conn))
+    rows = conn.execute(
+        f"""
+        SELECT b.id, b.phc_id, b.bed_type, b.total, b.occupied, b.updated_at,
+               p.name AS phc_name, p.block, p.state_id, p.district_id,
+               s.name AS state_name, d.name AS district_name
+        FROM bed_capacity b
+        JOIN phc p ON p.phc_id = b.phc_id
+        JOIN state s ON s.state_id = p.state_id
+        JOIN district d ON d.district_id = p.district_id
+        WHERE 1=1 {clause}
+        ORDER BY p.name, b.bed_type
+        """,
+        params,
+    ).fetchall()
+    generated_at = conn.execute("SELECT CURRENT_TIMESTAMP AS ts").fetchone()["ts"]
+    conn.close()
+
+    by_phc, order = {}, []
+    for r in rows:
+        item = dict(r)
+        entry = by_phc.get(item["phc_id"])
+        if entry is None:
+            entry = {
+                "phc_id": item["phc_id"],
+                "phc_name": item["phc_name"],
+                "block": item["block"],
+                "state_name": item["state_name"],
+                "district_name": item["district_name"],
+                "total": 0,
+                "occupied": 0,
+                "types": [],
+            }
+            by_phc[item["phc_id"]] = entry
+            order.append(entry)
+        entry["types"].append(
+            {"id": item["id"], "bed_type": item["bed_type"],
+             "total": item["total"], "occupied": item["occupied"]}
+        )
+        entry["total"] += item["total"]
+        entry["occupied"] += item["occupied"]
+
+    for e in order:
+        e["available"] = e["total"] - e["occupied"]
+        e["occupancy_pct"] = _pct(e["occupied"], e["total"])
+    total = sum(e["total"] for e in order)
+    occupied = sum(e["occupied"] for e in order)
+    return jsonify(
+        {
+            "beds": order,
+            "summary": {
+                "phcs": len(order),
+                "total": total,
+                "occupied": occupied,
+                "available": total - occupied,
+                "occupancy_pct": _pct(occupied, total),
+            },
+            "generated_at": generated_at,
+        }
+    )
+
+
+@app.post("/api/beds/<int:phc_id>")
+@login_required
+@role_required(*EDITOR_ROLES)
+def api_update_beds(phc_id):
+    """Update occupied counts for one bed type — aggregate capacity, no patient data."""
+    data = request.get_json(silent=True) or {}
+    bed_type = (data.get("bed_type") or "").strip()
+    if not bed_type:
+        return jsonify({"error": "bed_type required"}), 400
+    try:
+        occupied = int(data.get("occupied"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "occupied must be an integer"}), 400
+
+    conn = get_db()
+    if not _in_scope(conn, phc_id):
+        conn.close()
+        return jsonify({"error": "Forbidden"}), 403
+    row = conn.execute(
+        "SELECT id, total, occupied FROM bed_capacity WHERE phc_id = ? AND bed_type = ?",
+        (phc_id, bed_type),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Bed type not found for this PHC"}), 404
+    if occupied < 0 or occupied > row["total"]:
+        conn.close()
+        return jsonify({"error": f"occupied must be between 0 and {row['total']}"}), 400
+
+    conn.execute(
+        "UPDATE bed_capacity SET occupied = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (occupied, row["id"]),
+    )
+    log_audit(conn, "bed_update",
+              f"Bed capacity at PHC {phc_id}: {bed_type} {row['occupied']} -> {occupied} of {row['total']}")
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "occupancy_pct": _pct(occupied, row["total"])})
+
+
+@app.get("/api/staff")
+@login_required
+def api_staff():
+    conn = get_db()
+    clause, params = scope_clause(geo_scope(conn))
+    days = [(date.today() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    start, end = days[0], days[-1]
+    rows = conn.execute(
+        f"""
+        SELECT s.id, s.phc_id, s.staff_role, s.duty_date, s.staff, s.present, s.on_leave,
+               p.name AS phc_name, p.block, st.name AS state_name, dd.name AS district_name
+        FROM staff_attendance s
+        JOIN phc p ON p.phc_id = s.phc_id
+        JOIN state st ON st.state_id = p.state_id
+        JOIN district dd ON dd.district_id = p.district_id
+        WHERE s.duty_date BETWEEN ? AND ? {clause}
+        """,
+        (start, end, *params),
+    ).fetchall()
+    generated_at = conn.execute("SELECT CURRENT_TIMESTAMP AS ts").fetchone()["ts"]
+    conn.close()
+
+    trend_map = {d: {"duty_date": d, "staff": 0, "present": 0, "on_leave": 0} for d in days}
+    phc_map, phc_order = {}, []
+    for r in rows:
+        item = dict(r)
+        t = trend_map[item["duty_date"]]
+        t["staff"] += item["staff"]
+        t["present"] += item["present"]
+        t["on_leave"] += item["on_leave"]
+        if item["duty_date"] != end:
+            continue
+        entry = phc_map.get(item["phc_id"])
+        if entry is None:
+            entry = {
+                "phc_id": item["phc_id"],
+                "phc_name": item["phc_name"],
+                "block": item["block"],
+                "state_name": item["state_name"],
+                "district_name": item["district_name"],
+                "staff": 0, "present": 0, "on_leave": 0, "roles": [],
+            }
+            phc_map[item["phc_id"]] = entry
+            phc_order.append(entry)
+        entry["staff"] += item["staff"]
+        entry["present"] += item["present"]
+        entry["on_leave"] += item["on_leave"]
+        entry["roles"].append(
+            {"id": item["id"], "staff_role": item["staff_role"],
+             "staff": item["staff"], "present": item["present"], "on_leave": item["on_leave"]}
+        )
+
+    for e in phc_order:
+        e["absent"] = e["staff"] - e["present"] - e["on_leave"]
+        e["present_pct"] = _pct(e["present"], e["staff"])
+    for t in trend_map.values():
+        t["present_pct"] = _pct(t["present"], t["staff"])
+
+    staff_total = sum(e["staff"] for e in phc_order)
+    staff_present = sum(e["present"] for e in phc_order)
+    staff_leave = sum(e["on_leave"] for e in phc_order)
+    return jsonify(
+        {
+            "today": phc_order,
+            "trend": list(trend_map.values()),
+            "days": days,
+            "summary": {
+                "phcs": len(phc_order),
+                "staff": staff_total,
+                "present": staff_present,
+                "on_leave": staff_leave,
+                "absent": staff_total - staff_present - staff_leave,
+                "present_pct": _pct(staff_present, staff_total),
+            },
+            "generated_at": generated_at,
+        }
+    )
+
+
+@app.post("/api/staff")
+@login_required
+@role_required(*EDITOR_ROLES)
+def api_update_staff():
+    """Mark today's attendance for one role at one PHC."""
+    data = request.get_json(silent=True) or {}
+    phc_id = data.get("phc_id")
+    role = (data.get("staff_role") or "").strip()
+    if not phc_id or not role:
+        return jsonify({"error": "phc_id and staff_role required"}), 400
+    try:
+        present = int(data.get("present"))
+        on_leave = int(data.get("on_leave", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "present and on_leave must be integers"}), 400
+
+    conn = get_db()
+    if not _in_scope(conn, int(phc_id)):
+        conn.close()
+        return jsonify({"error": "Forbidden"}), 403
+    row = conn.execute(
+        "SELECT id, staff, present FROM staff_attendance WHERE phc_id = ? AND staff_role = ? AND duty_date = ?",
+        (int(phc_id), role, date.today().isoformat()),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "No attendance row for today"}), 404
+    if present < 0 or on_leave < 0 or present + on_leave > row["staff"]:
+        conn.close()
+        return jsonify({"error": f"present + on_leave must be between 0 and {row['staff']}"}), 400
+
+    conn.execute(
+        "UPDATE staff_attendance SET present = ?, on_leave = ? WHERE id = ?",
+        (present, on_leave, row["id"]),
+    )
+    log_audit(conn, "attendance_update",
+              f"Attendance at PHC {phc_id} / {role}: present {row['present']} -> {present}")
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
 
 
 # ============================== PHCs ==============================

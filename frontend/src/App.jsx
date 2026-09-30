@@ -4,6 +4,7 @@ import Layout from './components/Layout'
 import { Spinner } from './components/ui'
 import Alerts from './pages/Alerts'
 import Audit from './pages/Audit'
+import Beds from './pages/Beds'
 import Federated from './pages/Federated'
 import Inventory from './pages/Inventory'
 import Login from './pages/Login'
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/medicines" element={<Medicines />} />
         <Route path="/alerts" element={<Alerts />} />
+        <Route path="/beds" element={<Beds />} />
         <Route path="/redistribution" element={<Redistribution />} />
         <Route path="/upload" element={<Upload />} />
         <Route path="/federated" element={<Federated />} />

@@ -120,7 +120,35 @@ CREATE TABLE IF NOT EXISTS upload_history (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     confirmed_at TEXT
 );
+
+-- Aggregate capacity rows only: no patient-level data ever.
+CREATE TABLE IF NOT EXISTS bed_capacity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phc_id INTEGER NOT NULL REFERENCES phc(phc_id),
+    bed_type TEXT NOT NULL,
+    total INTEGER NOT NULL DEFAULT 0,
+    occupied INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (phc_id, bed_type)
+);
+
+CREATE TABLE IF NOT EXISTS staff_attendance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phc_id INTEGER NOT NULL REFERENCES phc(phc_id),
+    staff_role TEXT NOT NULL,
+    duty_date TEXT NOT NULL,
+    staff INTEGER NOT NULL DEFAULT 0,
+    present INTEGER NOT NULL DEFAULT 0,
+    on_leave INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (phc_id, staff_role, duty_date)
+);
 """
+
+BED_TYPES = ["General Ward", "Maternity", "Oxygen-supported", "Isolation"]
+BED_SHARE = [0.5, 0.2, 0.2, 0.1]
+STAFF_ROLES = ["Doctor", "Nurse", "ANM", "Pharmacist", "Lab Technician"]
+STAFF_STRENGTH = {"Doctor": (2, 4), "Nurse": (4, 8), "ANM": (2, 4),
+                  "Pharmacist": (1, 2), "Lab Technician": (1, 2)}
 
 MEDICINES = [
     ("Paracetamol 500mg", "Analgesic", "500mg", "tablet"),
@@ -225,8 +253,12 @@ def init_schema(conn):
 
 
 def _schema_is_current(conn):
-    """Old (pre-national) schema files are rebuilt, not migrated — the DB is
-    ephemeral on Render and re-seeds on every deploy anyway."""
+    """Old schema files are rebuilt, not migrated — the DB is ephemeral on
+    Render and re-seeds on every deploy anyway."""
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    required_tables = {"state", "district", "bed_capacity", "staff_attendance"}
+    if not required_tables.issubset(tables):
+        return False
     phc_cols = {r[1] for r in conn.execute("PRAGMA table_info(phc)")}
     if "state_id" not in phc_cols or "district_id" not in phc_cols:
         return False
@@ -288,6 +320,9 @@ def _seed_if_empty(conn):
                 (phc_id, med_id, stock, adc),
             )
 
+    seed_beds(conn)
+    seed_attendance(conn)
+
     from auth import hash_password
 
     phc_lookup = {r["name"]: r["phc_id"] for r in conn.execute("SELECT phc_id, name FROM phc")}
@@ -310,6 +345,47 @@ def _seed_if_empty(conn):
     )
 
 
+def seed_beds(conn):
+    """Aggregate bed capacity rows (no patient data). Idempotent."""
+    if conn.execute("SELECT COUNT(*) FROM bed_capacity").fetchone()[0]:
+        return
+    rng = random.Random(43)
+    for phc in conn.execute("SELECT phc_id, beds FROM phc ORDER BY phc_id").fetchall():
+        total_beds = int(phc["beds"] or 0)
+        shares = [int(total_beds * s) for s in BED_SHARE]
+        for i in range(total_beds - sum(shares)):
+            shares[i % len(shares)] += 1
+        for bed_type, total in zip(BED_TYPES, shares):
+            occupied = min(total, max(0, int(round(total * rng.uniform(0.45, 0.95))))) if total else 0
+            conn.execute(
+                "INSERT INTO bed_capacity (phc_id, bed_type, total, occupied) VALUES (?,?,?,?)",
+                (phc["phc_id"], bed_type, total, occupied),
+            )
+
+
+def seed_attendance(conn):
+    """7 days of duty staffing, up to and including today. Idempotent."""
+    if conn.execute("SELECT COUNT(*) FROM staff_attendance").fetchone()[0]:
+        return
+    from datetime import date, timedelta
+
+    rng = random.Random(44)
+    phc_rows = conn.execute("SELECT phc_id FROM phc ORDER BY phc_id").fetchall()
+    for offset in range(6, -1, -1):
+        duty = (date.today() - timedelta(days=offset)).isoformat()
+        for phc in phc_rows:
+            for role in STAFF_ROLES:
+                lo, hi = STAFF_STRENGTH[role]
+                staff = rng.randint(lo, hi)
+                on_leave = rng.randint(0, 1) if staff > 1 else 0
+                present = max(0, staff - on_leave - rng.randint(0, 1))
+                conn.execute(
+                    "INSERT INTO staff_attendance (phc_id, staff_role, duty_date, staff, present, on_leave)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (phc["phc_id"], role, duty, staff, present, on_leave),
+                )
+
+
 def bootstrap():
     if os.path.exists(DB_PATH):
         probe = sqlite3.connect(DB_PATH)
@@ -327,6 +403,8 @@ def bootstrap():
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     _seed_if_empty(conn)
+    seed_beds(conn)
+    seed_attendance(conn)
     conn.commit()
     conn.close()
     from stock import refresh_alerts

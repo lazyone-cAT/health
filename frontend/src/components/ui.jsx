@@ -17,6 +17,7 @@ export const Icons = {
   logout: svg(<><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></>),
   search: svg(<><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></>),
   logo: svg(<><path d="M12 2 3 7v10l9 5 9-5V7z" /><path d="M12 22V12" /><path d="m3 7 9 5 9-5" /></>),
+  beds: svg(<><path d="M2 18v-6h20v6" /><path d="M2 18v3M22 18v3" /><path d="M4 12V6h6a3 3 0 0 1 3 3v3" /><path d="M13 12V9h6a3 3 0 0 1 3 3v0" /><circle cx="7.5" cy="8.5" r="1.5" /></>),
 }
 
 export function KpiCard({ label, value, detail, tone }) {
