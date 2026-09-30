@@ -13,7 +13,7 @@ const NAV = [
   { to: '/beds', label: 'Beds & Staff', icon: 'beds', roles: ALL },
   { to: '/redistribution', label: 'Redistribution', icon: 'swap', roles: ALL },
   { to: '/upload', label: 'Upload', icon: 'upload', roles: OFFICERS },
-  { to: '/federated', label: 'Federated', icon: 'federated', roles: ALL },
+  { to: '/federated', label: 'Federated', icon: 'federated', roles: OFFICERS },
   { to: '/audit', label: 'Audit Log', icon: 'audit', roles: OFFICERS },
 ]
 

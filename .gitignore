@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 backend/phc_inventory.db
+backend/nodes/
 backend/uploads/
 backend/server.log
 

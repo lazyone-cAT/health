@@ -431,6 +431,7 @@ h1,h2,h3{font-family: 'Fraunces', serif; letter-spacing: -0.03em; line-height: 1
 .node-card{border:1px solid var(--line); background:#fff; padding:13px 14px; position:relative}
 .node-card::before{content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--accent)}
 .node-card.degraded::before{background:#eab308}
+.node-card.suppressed::before{background:var(--warn)}
 .node-card.offline::before{background:var(--danger)}
 .node-id{font-family:'JetBrains Mono',monospace; font-size:0.70rem; color:var(--muted); letter-spacing:0.04em}
 .node-name{font-family:'Fraunces',serif; font-weight:700; font-size:0.98rem; margin:3px 0 8px}

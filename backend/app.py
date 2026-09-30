@@ -18,6 +18,7 @@ import forecast
 import stock
 import upload as uploader
 from auth import OFFICER_ROLES, hash_password, log_audit, login_required, role_required
+import federated as federation
 from federated import FEDERATED_DEMO
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1476,6 +1477,29 @@ def api_audit():
 @login_required
 def api_federated_demo():
     return jsonify(FEDERATED_DEMO)
+
+
+@app.get("/api/federated/live")
+@login_required
+@role_required(*OFFICER_ROLES)
+def api_federated_live():
+    """Live federation round: sync per-state nodes, train on-node, FedAvg."""
+    conn = get_db()
+    own_state = session.get("state_id")
+    state_ids = [own_state] if own_state else None
+    resync = request.args.get("resync") in ("1", "true")
+    payload = federation.run_federation(conn, state_ids=state_ids, resync=resync)
+    agg = payload["aggregated_result"]
+    log_audit(
+        conn,
+        "federation_round",
+        f"{payload['federation_id']}: {agg['nodes_reporting']}/{agg['nodes_total']} "
+        f"nodes, fedavg_r2={agg['fedavg_r2']}, {payload['total_ms']}ms"
+        + (" (resync)" if resync else ""),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify(payload)
 
 
 # ============================== Static frontend ==============================
